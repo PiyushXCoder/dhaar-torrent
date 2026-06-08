@@ -1,0 +1,27 @@
+#!/bin/sh
+msg=$(cat "$1")
+
+# semantic prefix: type(optional-scope): message
+if ! echo "$msg" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\(.+\))?: .+'; then
+  echo "error: commit message must use semantic prefix"
+  echo "  e.g. feat: add peer connection logic"
+  echo "  types: feat fix docs style refactor perf test chore build ci revert"
+  exit 1
+fi
+
+# first letter after ': ' must be lowercase
+after_colon=$(echo "$msg" | sed 's/^[^:]*: //')
+first_char=$(echo "$after_colon" | cut -c1)
+if echo "$first_char" | grep -qE '^[A-Z]$'; then
+  echo "error: first letter after ':' must be lowercase"
+  echo "  got: $msg"
+  exit 1
+fi
+
+# word count in subject line must be > 4
+word_count=$(echo "$after_colon" | wc -w)
+if [ "$word_count" -le 4 ]; then
+  echo "error: commit message too short — need more than 4 words after prefix"
+  echo "  got $word_count word(s): \"$after_colon\""
+  exit 1
+fi
