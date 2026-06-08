@@ -128,6 +128,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "home-config",
+ "husky-rs",
  "merge",
  "serde",
  "tokio",
@@ -202,6 +203,12 @@ checksum = "32e43bedc3b8c90e5f6efe0d347848c0049eb1e9206142627982cd7bc5fe5223"
 dependencies = [
  "dirs",
 ]
+
+[[package]]
+name = "husky-rs"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7efd8aa8491dc34722e4038a2fff2ce6cf1343976c81aa94bc1da5eeb6b7d2b2"
 
 [[package]]
 name = "indexmap"
