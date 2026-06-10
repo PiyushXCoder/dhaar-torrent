@@ -40,3 +40,8 @@ fn test_parse_dict() {
         HashMap::from([("spam".to_string(), 345)])
     )
 }
+
+#[test]
+fn test_parse_unit() {
+    assert_eq!(from_bytes::<()>(b"").unwrap(), ())
+}
