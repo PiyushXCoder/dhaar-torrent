@@ -1,6 +1,6 @@
-# dhaar-torrent
-
 ![cover](assets/cover.png)
+
+# Dhaar Torrent _(धार टॉरेंट)_
 
 A torrent client written in Rust. Unserious. Built for fun.
 
@@ -23,8 +23,8 @@ dhaar-torrent <torrent_file> [OPTIONS]
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
+| Flag                       | Description                                                          |
+| -------------------------- | -------------------------------------------------------------------- |
 | `-c, --config-file <PATH>` | Path to config file (default: `~/.config/dhaar-torrent/config.toml`) |
 
 ### Example
