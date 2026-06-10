@@ -301,7 +301,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
         }
     }
 
-    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
@@ -324,19 +324,27 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        if self.next_byte()? == b'd' {
+            let value = visitor.visit_map(BencodeMap::new(self))?;
+            if self.next_byte()? != b'e' {
+                return Err(error::Error::Syntax);
+            }
+            Ok(value)
+        } else {
+            Err(error::Error::Syntax)
+        }
     }
 
     fn deserialize_struct<V>(
         self,
-        name: &'static str,
-        fields: &'static [&'static str],
+        _name: &'static str,
+        _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        self.deserialize_map(visitor)
     }
 
     fn deserialize_enum<V>(
@@ -412,13 +420,23 @@ impl<'a, 'de> de::MapAccess<'de> for BencodeMap<'a, 'de> {
     where
         K: DeserializeSeed<'de>,
     {
-        todo!()
+        let b = self.de.peek_byte()?;
+        if b == b'e' {
+            return Ok(None);
+        }
+        if !b.is_ascii_digit() {
+            return Err(error::Error::Syntax);
+        }
+        seed.deserialize(&mut *self.de).map(Some)
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
     where
         V: DeserializeSeed<'de>,
     {
-        todo!()
+        if self.de.peek_byte()? == b'e' {
+            return Err(error::Error::Syntax);
+        }
+        seed.deserialize(&mut *self.de)
     }
 }
