@@ -6,7 +6,14 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-Very early. Currently parses CLI args and config. Actual torrenting: coming eventually, maybe.
+Very early. Actual torrenting: coming eventually, maybe.
+
+- [x] CLI args and config parsing
+- [x] Bencode deserializer (serde-based: integers, strings, bytes, lists, dicts)
+- [x] Bencode serializer (serde-based: integers, strings, bytes, lists, dicts)
+- [ ] Torrent file parsing
+- [ ] Tracker communication
+- [ ] Peer wire protocol
 
 ## Usage
 
