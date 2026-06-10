@@ -290,26 +290,34 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        if self.next_byte()? == b'l' {
+            let value = visitor.visit_seq(BencodeSeq::new(self))?;
+            if self.next_byte()? != b'e' {
+                return Err(error::Error::Syntax);
+            }
+            Ok(value)
+        } else {
+            Err(error::Error::Syntax)
+        }
     }
 
     fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_tuple_struct<V>(
         self,
-        name: &'static str,
-        len: usize,
+        _name: &'static str,
+        _len: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        self.deserialize_seq(visitor)
     }
 
     fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -358,6 +366,59 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
     }
 
     fn is_human_readable(&self) -> bool {
+        todo!()
+    }
+}
+
+struct BencodeSeq<'a, 'de: 'a> {
+    de: &'a mut BencodeDeserializer<'de>,
+}
+
+impl<'a, 'de> BencodeSeq<'a, 'de> {
+    fn new(de: &'a mut BencodeDeserializer<'de>) -> Self {
+        BencodeSeq { de }
+    }
+}
+
+impl<'a, 'de> de::SeqAccess<'de> for BencodeSeq<'a, 'de> {
+    type Error = error::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        if self.de.peek_byte()? == b'e' {
+            return Ok(None);
+        }
+
+        seed.deserialize(&mut *self.de).map(Some)
+    }
+}
+
+struct BencodeMap<'a, 'de: 'a> {
+    de: &'a mut BencodeDeserializer<'de>,
+}
+
+impl<'a, 'de> BencodeMap<'a, 'de> {
+    fn new(de: &'a mut BencodeDeserializer<'de>) -> Self {
+        BencodeMap { de }
+    }
+}
+
+impl<'a, 'de> de::MapAccess<'de> for BencodeMap<'a, 'de> {
+    type Error = error::Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        todo!()
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
         todo!()
     }
 }
