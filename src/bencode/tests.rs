@@ -14,7 +14,10 @@ fn test_parse_string() {
 
 #[test]
 fn test_parse_bytes() {
-    assert_eq!(from_bytes::<Vec<u8>>(b"4:spam").unwrap(), b"spam");
+    assert_eq!(
+        from_bytes::<serde_bytes::ByteBuf>(b"4:spam").unwrap(),
+        b"spam"
+    );
 }
 
 #[test]
