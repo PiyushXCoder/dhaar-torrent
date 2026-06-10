@@ -48,38 +48,41 @@ fn test_parse_unit() {
 
 #[test]
 fn test_serialize_integer() {
-    assert_eq!(to_bytes(&345u32), b"i345e");
+    assert_eq!(to_bytes(&345u32).unwrap(), b"i345e");
 }
 
 #[test]
 fn test_serialize_negative_integer() {
-    assert_eq!(to_bytes(&-345i32), b"i-345e");
+    assert_eq!(to_bytes(&-345i32).unwrap(), b"i-345e");
 }
 
 #[test]
 fn test_serialize_string() {
-    assert_eq!(to_bytes(&"spam"), b"4:spam");
+    assert_eq!(to_bytes(&"spam").unwrap(), b"4:spam");
 }
 
 #[test]
 fn test_serialize_bytes() {
-    assert_eq!(to_bytes(&serde_bytes::Bytes::new(b"spam")), b"4:spam");
+    assert_eq!(
+        to_bytes(&serde_bytes::Bytes::new(b"spam")).unwrap(),
+        b"4:spam"
+    );
 }
 
 #[test]
 fn test_serialize_list() {
-    assert_eq!(to_bytes(&vec![345u32, 4]), b"li345ei4ee");
+    assert_eq!(to_bytes(&vec![345u32, 4]).unwrap(), b"li345ei4ee");
 }
 
 #[test]
 fn test_serialize_tuple() {
-    assert_eq!(to_bytes(&(345, "hello")), b"li345e5:helloe");
+    assert_eq!(to_bytes(&(345, "hello")).unwrap(), b"li345e5:helloe");
 }
 
 #[test]
 fn test_serialize_dict() {
     assert_eq!(
-        to_bytes(&HashMap::from([("spam".to_string(), 345)])),
+        to_bytes(&HashMap::from([("spam".to_string(), 345)])).unwrap(),
         b"d4:spami345ee"
     );
 }
@@ -87,7 +90,7 @@ fn test_serialize_dict() {
 #[test]
 fn test_roundtrip_dict() {
     let original = HashMap::from([("spam".to_string(), 345u32)]);
-    let encoded = to_bytes(&original);
+    let encoded = to_bytes(&original).unwrap();
     assert_eq!(
         from_bytes::<HashMap<String, u32>>(&encoded).unwrap(),
         original
