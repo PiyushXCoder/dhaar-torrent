@@ -1,5 +1,5 @@
 use derive_more::derive::Display;
-use serde::de;
+use serde::{de, ser};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -22,6 +22,15 @@ pub enum Error {
 }
 
 impl de::Error for Error {
+    fn custom<T>(msg: T) -> Self
+    where
+        T: std::fmt::Display,
+    {
+        Error::Message(msg.to_string())
+    }
+}
+
+impl ser::Error for Error {
     fn custom<T>(msg: T) -> Self
     where
         T: std::fmt::Display,
