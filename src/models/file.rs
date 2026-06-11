@@ -1,7 +1,15 @@
-use crate::bencode::chrono::{deserialize as chrono_deserialize, serialize as chrono_serialize};
+use crate::bencode::{
+    Raw,
+    chrono::{deserialize as chrono_deserialize, serialize as chrono_serialize},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+
+#[derive(Debug, Deserialize)]
+pub struct TorrentFileRawInfo {
+    pub info: Raw<Info>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TorrentFile {

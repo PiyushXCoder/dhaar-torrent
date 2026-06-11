@@ -3,6 +3,7 @@ use crate::config::get_configuration;
 pub mod bencode;
 pub mod client;
 mod config;
+pub mod helpers;
 pub mod models;
 
 #[tokio::main]

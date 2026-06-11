@@ -13,6 +13,7 @@ merge = "0.2.0"
 num-traits = { version = "0.2.19", features = ["i128"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11.19"
+sha1 = "0.11.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"

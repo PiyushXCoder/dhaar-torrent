@@ -81,6 +81,25 @@ fn test_parse_ignored_any() {
 }
 
 #[test]
+fn test_parse_raw() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Inner {
+        x: i64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Outer {
+        a: Raw<Inner>,
+        b: u32,
+    }
+
+    // raw span must be exact original bytes, unknown key `y` included
+    let outer = from_bytes::<Outer>(b"d1:ad1:xi5e1:yli1ei2eee1:bi7ee").unwrap();
+    assert_eq!(outer.a.bytes, b"d1:xi5e1:yli1ei2eee");
+    assert_eq!(outer.b, 7);
+}
+
+#[test]
 fn test_parse_unit() {
     assert_eq!(from_bytes::<()>(b"").unwrap(), ())
 }

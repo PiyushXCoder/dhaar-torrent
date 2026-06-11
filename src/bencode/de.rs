@@ -105,6 +105,44 @@ impl<'de> BencodeDeserializer<'de> {
         }
         return Ok(result);
     }
+
+    /// Consumes one complete value of any type without decoding it.
+    fn skip_value(&mut self) -> error::Result<()> {
+        match self.peek_byte()? {
+            b'0'..=b'9' => {
+                self.parse_bytes()?;
+            }
+            b'i' => {
+                self.next_byte()?;
+                loop {
+                    let b = self.next_byte()?;
+                    if b == b'e' {
+                        break;
+                    }
+                    if !b.is_ascii_digit() && b != b'-' {
+                        return Err(error::Error::Syntax);
+                    }
+                }
+            }
+            b'l' => {
+                self.next_byte()?;
+                while self.peek_byte()? != b'e' {
+                    self.skip_value()?;
+                }
+                self.next_byte()?;
+            }
+            b'd' => {
+                self.next_byte()?;
+                while self.peek_byte()? != b'e' {
+                    self.parse_bytes()?;
+                    self.skip_value()?;
+                }
+                self.next_byte()?;
+            }
+            _ => return Err(error::Error::Syntax),
+        }
+        Ok(())
+    }
 }
 
 impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
@@ -286,12 +324,18 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
 
     fn deserialize_newtype_struct<V>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
+        if name == super::raw::RAW_TOKEN {
+            let start = self.input;
+            self.skip_value()?;
+            let span = &start[..start.len() - self.input.len()];
+            return visitor.visit_borrowed_bytes(span);
+        }
         visitor.visit_newtype_struct(self)
     }
 
