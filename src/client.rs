@@ -14,6 +14,6 @@ impl Client {
     pub async fn download_from_file(&self, file: PathBuf) {
         let torrent_file_data = fs::read(file).await.unwrap();
         let parse = bencode::from_bytes::<models::file::TorrentFile>(&torrent_file_data).unwrap();
-        // println!("{:?}", parse);
+        println!("{:?}", parse);
     }
 }
