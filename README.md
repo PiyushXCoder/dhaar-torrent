@@ -11,7 +11,8 @@ Very early. Actual torrenting: coming eventually, maybe.
 - [x] CLI args and config parsing
 - [x] Bencode deserializer (serde-based: integers, strings, bytes, lists, dicts)
 - [x] Bencode serializer (serde-based: integers, strings, bytes, lists, dicts)
-- [ ] Torrent file parsing
+- [x] Torrent file parsing (single and multi-file, raw `info` capture via serde)
+- [x] Info hash (SHA-1 of bencoded `info` dict; hex and URL-safe forms)
 - [ ] Tracker communication
 - [ ] Peer wire protocol
 
