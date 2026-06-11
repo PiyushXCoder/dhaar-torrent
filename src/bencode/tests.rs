@@ -42,6 +42,45 @@ fn test_parse_dict() {
 }
 
 #[test]
+fn test_parse_any() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Integer(i64),
+        String(String),
+        List(Vec<Value>),
+        Dict(HashMap<String, Value>),
+    }
+
+    assert_eq!(from_bytes::<Value>(b"i345e").unwrap(), Value::Integer(345));
+    assert_eq!(
+        from_bytes::<Value>(b"4:spam").unwrap(),
+        Value::String("spam".to_string())
+    );
+    assert_eq!(
+        from_bytes::<Value>(b"li345e4:spame").unwrap(),
+        Value::List(vec![Value::Integer(345), Value::String("spam".to_string())])
+    );
+    assert_eq!(
+        from_bytes::<Value>(b"d4:spamli345eee").unwrap(),
+        Value::Dict(HashMap::from([(
+            "spam".to_string(),
+            Value::List(vec![Value::Integer(345)])
+        )]))
+    );
+}
+
+#[test]
+fn test_parse_ignored_any() {
+    assert_eq!(
+        from_bytes::<(serde::de::IgnoredAny, u32)>(b"ld1:ai1eei7ee")
+            .unwrap()
+            .1,
+        7
+    );
+}
+
+#[test]
 fn test_parse_unit() {
     assert_eq!(from_bytes::<()>(b"").unwrap(), ())
 }

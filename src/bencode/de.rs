@@ -111,11 +111,23 @@ impl<'de> BencodeDeserializer<'de> {
 impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
     type Error = error::Error;
 
-    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        todo!()
+        match self.peek_byte()? {
+            b'i' => visitor.visit_i64(self.parse_integer()?),
+            b'0'..=b'9' => {
+                let bytes = self.parse_bytes()?;
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => visitor.visit_borrowed_str(s),
+                    Err(_) => visitor.visit_borrowed_bytes(bytes),
+                }
+            }
+            b'l' => self.deserialize_seq(visitor),
+            b'd' => self.deserialize_map(visitor),
+            _ => Err(error::Error::Syntax),
+        }
     }
 
     fn deserialize_bool<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -369,10 +381,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
         V: de::Visitor<'de>,
     {
         self.deserialize_any(visitor)
-    }
-
-    fn is_human_readable(&self) -> bool {
-        todo!()
     }
 }
 
