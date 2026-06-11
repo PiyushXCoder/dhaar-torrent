@@ -52,7 +52,6 @@ impl<'de> BencodeDeserializer<'de> {
             if c == ':' {
                 break;
             }
-            println!("{:?}", c);
             if !c.is_ascii_digit() {
                 return Err(error::Error::Message("length is not a number".to_string()));
             }
