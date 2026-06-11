@@ -1,3 +1,5 @@
+use crate::bencode::chrono::{deserialize as chrono_deserialize, serialize as chrono_serialize};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
@@ -7,8 +9,12 @@ pub struct TorrentFile {
     pub announce: String,
     #[serde(rename = "announce-list")]
     pub announce_list: Option<Vec<Vec<String>>>,
-    #[serde(rename = "creation date")]
-    pub creation_date: Option<u64>,
+    #[serde(
+        rename = "creation date",
+        serialize_with = "chrono_serialize",
+        deserialize_with = "chrono_deserialize"
+    )]
+    pub creation_date: Option<DateTime<Utc>>,
     pub comment: Option<String>,
     #[serde(rename = "created by")]
     pub created_by: Option<String>,
