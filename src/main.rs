@@ -5,6 +5,7 @@ pub mod client;
 mod config;
 pub mod helpers;
 pub mod models;
+pub mod torrent_file;
 
 #[tokio::main]
 async fn main() {
