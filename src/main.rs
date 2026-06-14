@@ -9,6 +9,7 @@ pub mod torrent_file;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     let config = get_configuration();
     let client = client::Client::new();
     client.download_from_file(config.torrent_file).await;
