@@ -36,7 +36,7 @@ pub struct Info {
     pub pieces: ByteBuf,
     pub private: Option<u8>,
     pub name: String,
-    pub length: u64,
+    pub length: Option<u64>,
     pub md5sum: Option<String>,
     pub files: Option<Vec<File>>,
 }
