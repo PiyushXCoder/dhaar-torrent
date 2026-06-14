@@ -301,7 +301,11 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        visitor.visit_some(self)
+        if self.input.is_empty() {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
     }
 
     fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
