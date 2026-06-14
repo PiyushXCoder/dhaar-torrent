@@ -6,15 +6,36 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-Very early. Actual torrenting: coming eventually, maybe.
+~15% complete. Bencode codec and torrent file parsing done. Networking and protocol layer not started.
 
-- [x] CLI args and config parsing
-- [x] Bencode deserializer (serde-based: integers, strings, bytes, lists, dicts)
+### Done
+
+- [x] CLI args and config parsing (clap + TOML with merge)
+- [x] Bencode deserializer (serde-based: integers, strings, bytes, lists, dicts, `Raw<T>`)
 - [x] Bencode serializer (serde-based: integers, strings, bytes, lists, dicts)
-- [x] Torrent file parsing (single and multi-file, raw `info` capture via serde)
-- [x] Info hash (SHA-1 of bencoded `info` dict; hex and URL-safe forms)
-- [ ] Tracker communication
-- [ ] Peer wire protocol
+- [x] Torrent file parsing (single and multi-file structs, raw `info` capture via serde)
+- [x] Info hash computation (SHA-1 of bencoded `info` dict; hex and URL-safe forms)
+- [x] Chrono datetime support in bencode (unix timestamp serde)
+
+### Bugs to Fix
+
+- [ ] Negative integer deserialization broken (`i-345e` fails)
+- [ ] `Option` deserialization always produces `Some`
+- [ ] Multi-file torrent parsing fails (expects `length` field)
+
+### TODO
+
+- [ ] Logging/tracing — add `tracing` + `tracing-subscriber` with env-filter
+- [ ] Tracker communication — HTTP tracker (BEP 3), then UDP tracker (BEP 15)
+- [ ] Peer wire protocol — TCP handshake, choke/unchoke, interested, request messages
+- [ ] Piece manager — piece indices, bitfield tracking, download/upload queues
+- [ ] Disk I/O — writing verified pieces to disk, resume support
+- [ ] DHT (BEP 5) — decentralized peer discovery
+- [ ] Magnet links (BEP 9/10) — metadata exchange
+- [ ] Upload/seeding
+- [ ] Rate limiting
+- [ ] `lib.rs` for library API
+- [ ] `models/` module — shared domain types
 
 ## Usage
 
