@@ -5,6 +5,12 @@ pub struct BencodeSerializer {
     output: Vec<u8>,
 }
 
+impl Default for BencodeSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BencodeSerializer {
     pub fn new() -> BencodeSerializer {
         BencodeSerializer { output: Vec::new() }
@@ -20,7 +26,7 @@ where
     Ok(serializer.output)
 }
 
-impl<'a> ser::Serializer for &'a mut BencodeSerializer {
+impl ser::Serializer for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
     type SerializeSeq = Self;
@@ -207,7 +213,7 @@ impl<'a> ser::Serializer for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeSeq for &'a mut BencodeSerializer {
+impl ser::SerializeSeq for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -224,7 +230,7 @@ impl<'a> ser::SerializeSeq for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeTuple for &'a mut BencodeSerializer {
+impl ser::SerializeTuple for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -240,7 +246,7 @@ impl<'a> ser::SerializeTuple for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeTupleStruct for &'a mut BencodeSerializer {
+impl ser::SerializeTupleStruct for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -256,7 +262,7 @@ impl<'a> ser::SerializeTupleStruct for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeTupleVariant for &'a mut BencodeSerializer {
+impl ser::SerializeTupleVariant for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -272,7 +278,7 @@ impl<'a> ser::SerializeTupleVariant for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeMap for &'a mut BencodeSerializer {
+impl ser::SerializeMap for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -296,7 +302,7 @@ impl<'a> ser::SerializeMap for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeStruct for &'a mut BencodeSerializer {
+impl ser::SerializeStruct for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 
@@ -312,7 +318,7 @@ impl<'a> ser::SerializeStruct for &'a mut BencodeSerializer {
     }
 }
 
-impl<'a> ser::SerializeStructVariant for &'a mut BencodeSerializer {
+impl ser::SerializeStructVariant for &mut BencodeSerializer {
     type Ok = ();
     type Error = error::Error;
 

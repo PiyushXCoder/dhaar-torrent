@@ -61,7 +61,7 @@ impl<'de> BencodeDeserializer<'de> {
         let string_bytes = &self.input[0..length];
         self.input = &self.input[length..];
         let string = std::str::from_utf8(string_bytes).map_err(|_| error::Error::Utf8)?;
-        return Ok(string);
+        Ok(string)
     }
 
     fn parse_bytes(&mut self) -> error::Result<&'de [u8]> {
@@ -79,7 +79,7 @@ impl<'de> BencodeDeserializer<'de> {
         let length = length.parse::<usize>().map_err(|_| error::Error::Syntax)?;
         let bytes = &self.input[0..length];
         self.input = &self.input[length..];
-        return Ok(bytes);
+        Ok(bytes)
     }
 
     fn parse_integer<T: PrimInt + FromStr>(&mut self) -> error::Result<T> {
@@ -107,7 +107,7 @@ impl<'de> BencodeDeserializer<'de> {
         if !has_end {
             return Err(error::Error::Syntax);
         }
-        return Ok(result);
+        Ok(result)
     }
 
     /// Consumes one complete value of any type without decoding it.
@@ -149,7 +149,7 @@ impl<'de> BencodeDeserializer<'de> {
     }
 }
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut BencodeDeserializer<'de> {
+impl<'de> de::Deserializer<'de> for &mut BencodeDeserializer<'de> {
     type Error = error::Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
