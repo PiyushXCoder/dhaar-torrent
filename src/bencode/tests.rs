@@ -8,6 +8,11 @@ fn test_parse_integer() {
 }
 
 #[test]
+fn test_parse_negative_integer() {
+    assert_eq!(from_bytes::<i32>(b"i-345e").unwrap(), -345);
+}
+
+#[test]
 fn test_parse_string() {
     assert_eq!(from_bytes::<String>(b"4:spam").unwrap(), "spam");
 }

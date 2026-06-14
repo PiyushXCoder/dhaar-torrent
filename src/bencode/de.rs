@@ -87,6 +87,10 @@ impl<'de> BencodeDeserializer<'de> {
             return Err(error::Error::Syntax);
         }
         let mut result = String::new();
+        if self.peek_byte()? == b'-' {
+            result += "-";
+            self.next_byte()?;
+        }
         let mut has_end = false;
         while let Ok(b) = self.next_byte() {
             let c = b as char;
