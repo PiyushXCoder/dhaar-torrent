@@ -1,3 +1,4 @@
+use crate::bencode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -6,8 +7,16 @@ pub enum Error {
     ReqwestError(#[from] reqwest::Error),
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("toml error: {0}")]
+    #[error("toml de error: {0}")]
     TomlError(#[from] toml::de::Error),
+    #[error("toml ser error: {0}")]
+    TomlSerError(#[from] toml::ser::Error),
+    #[error("bencode error: {0}")]
+    BencodeError(#[from] bencode::error::Error),
+    #[error("tracker error: {0}")]
+    TrackerError(String),
     #[error("error: {0}")]
     Error(String),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
