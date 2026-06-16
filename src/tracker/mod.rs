@@ -106,6 +106,7 @@ pub struct Tracker {
     pub backup_urls: VecDeque<String>,
     pub next_run: Instant,
     pub failed_count: u32,
+    pub tracker_id: Option<String>,
 }
 
 impl PartialEq for Tracker {
@@ -134,6 +135,7 @@ impl Tracker {
             backup_urls,
             next_run: Instant::now(),
             failed_count: 0,
+            tracker_id: None,
         }
     }
 
