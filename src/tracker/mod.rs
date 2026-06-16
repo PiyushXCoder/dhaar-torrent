@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use crate::bencode;
 use crate::error::Result;
@@ -17,7 +18,7 @@ fn url_encode_bytes(bytes: &[u8]) -> String {
     result
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TrackerAnnounceParams {
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
@@ -54,7 +55,7 @@ impl TrackerAnnounceParams {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum TrackerEvent {
     Started,
@@ -99,10 +100,30 @@ impl std::hash::Hash for Peer {
     }
 }
 
+#[derive(Debug, Eq, Clone)]
 pub struct Tracker {
     pub announce_url: String,
     pub backup_urls: VecDeque<String>,
-    pub interval: u32,
+    pub next_run: Instant,
+    pub failed_count: u32,
+}
+
+impl PartialEq for Tracker {
+    fn eq(&self, other: &Self) -> bool {
+        self.next_run == other.next_run
+    }
+}
+
+impl Ord for Tracker {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.next_run.cmp(&other.next_run).reverse()
+    }
+}
+
+impl PartialOrd for Tracker {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Tracker {
@@ -111,7 +132,8 @@ impl Tracker {
         Tracker {
             announce_url: announce_url.to_string(),
             backup_urls,
-            interval: 0,
+            next_run: Instant::now(),
+            failed_count: 0,
         }
     }
 

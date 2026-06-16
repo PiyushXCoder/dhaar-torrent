@@ -1,5 +1,12 @@
-use std::{collections::HashSet, sync::Arc};
-use tokio::sync::RwLock;
+use std::{
+    collections::{BinaryHeap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    sync::RwLock,
+    time::{Instant, sleep_until},
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -45,49 +52,65 @@ impl Torrent {
         let torrent_file = self.torrent_file.clone();
         let available_peers = self.available_peers.clone();
         tokio::spawn(async move {
-            let mut trackers = trackers.write().await;
-            let piece_bag = piece_bag.read().await;
-            let params = TrackerAnnounceParams {
-                downloaded: piece_bag.downloaded,
-                uploaded: piece_bag.uploaded,
-                left: torrent_file.info.length.unwrap_or(u64::MAX) - piece_bag.downloaded,
-                ..default_tracker_announce_params // downloaded: piece_bag.downloaded,
-            };
-            for tracker in trackers.iter_mut() {
-                let mut success = false;
+            let mut heap: BinaryHeap<Tracker> = BinaryHeap::new();
+            for tracker in trackers.read().await.iter() {
+                heap.push(tracker.to_owned());
+            }
 
+            loop {
+                let mut tracker = heap.pop().unwrap();
+                sleep_until(tracker.next_run).await;
+
+                let params = TrackerAnnounceParams {
+                    downloaded: piece_bag.read().await.downloaded,
+                    uploaded: piece_bag.read().await.uploaded,
+                    left: torrent_file.info.length.unwrap_or(u64::MAX)
+                        - piece_bag.read().await.downloaded,
+                    ..default_tracker_announce_params.clone()
+                };
+
+                let mut success = false;
                 info!("Announcing to tracker {}", tracker.announce_url);
-                for _ in 0..(tracker.backup_urls.len() + 1) {
+
+                let attempt_count = tracker.backup_urls.len() + 1;
+                for _ in 0..attempt_count {
                     match tracker.announce(&params).await {
                         Ok(response) => {
-                            let Some(peers) = response.peers else {
-                                warn!("Got no peers from tracker");
-                                tracker.rotate_url();
-                                continue;
-                            };
+                            if let Some(peers) = response.peers {
+                                info!("Got {} peers from tracker", peers.len());
+                                available_peers.write().await.extend(peers);
 
-                            info!("Got {} peers from tracker", peers.len());
-
-                            let mut available_peers = available_peers.write().await;
-                            for peer in peers {
-                                available_peers.insert(peer);
+                                tracker.next_run = Instant::now()
+                                    + Duration::from_secs(response.interval.unwrap_or(10) as u64);
+                                tracker.failed_count = 0;
+                                success = true;
+                                break;
                             }
-
-                            success = true;
-                            break;
+                            warn!("Got no peers from tracker");
                         }
                         Err(err) => {
                             warn!("Got error from tracker: {}", err);
-                            tracker.rotate_url();
                         }
                     }
+                    tracker.failed_count += 1;
+                    tracker.next_run =
+                        Instant::now() + Duration::from_secs(10 * tracker.failed_count as u64);
+                    tracker.rotate_url();
                 }
 
                 if !success {
                     warn!("Failed to get peers from all trackers");
                 }
+                let sleep_dur = tracker
+                    .next_run
+                    .saturating_duration_since(tokio::time::Instant::now());
+                info!(
+                    "Sleeping tracker till {}",
+                    (chrono::Local::now() + chrono::Duration::from_std(sleep_dur).unwrap())
+                        .format("%Y-%m-%d %H:%M:%S %Z")
+                );
+                heap.push(tracker);
             }
-            info!("{:#?}", available_peers.read().await);
         })
         .await?;
         Ok(())
