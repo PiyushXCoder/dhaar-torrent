@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bencode;
@@ -32,6 +34,26 @@ pub struct TrackerAnnounceParams {
     pub tracker_id: Option<String>,
 }
 
+impl TrackerAnnounceParams {
+    pub fn new(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
+        TrackerAnnounceParams {
+            info_hash: *info_hash,
+            peer_id: *peer_id,
+            port: 6889,
+            uploaded: 0,
+            downloaded: 0,
+            left: 0,
+            compact: false,
+            no_peer_id: false,
+            event: None,
+            ip: None,
+            num_want: None,
+            key: None,
+            tracker_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrackerEvent {
@@ -56,7 +78,7 @@ pub struct TrackerResponse {
     pub peers: Option<Vec<Peer>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq)]
 pub struct Peer {
     #[serde(rename = "peer id")]
     pub peer_id: Option<[u8; 20]>,
@@ -64,15 +86,39 @@ pub struct Peer {
     pub port: u16,
 }
 
+impl PartialEq for Peer {
+    fn eq(&self, other: &Self) -> bool {
+        self.ip == other.ip && self.port == other.port
+    }
+}
+
+impl std::hash::Hash for Peer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ip.hash(state);
+        self.port.hash(state);
+    }
+}
+
 pub struct Tracker {
     pub announce_url: String,
+    pub backup_urls: VecDeque<String>,
+    pub interval: u32,
 }
 
 impl Tracker {
-    pub fn new(announce_url: String) -> Tracker {
-        Tracker { announce_url }
+    pub fn new(announce_url: &str, backup_urls: Vec<String>) -> Tracker {
+        let backup_urls = VecDeque::from(backup_urls);
+        Tracker {
+            announce_url: announce_url.to_string(),
+            backup_urls,
+            interval: 0,
+        }
     }
 
+    pub fn rotate_url(&mut self) {
+        self.backup_urls.push_back(self.announce_url.clone());
+        self.announce_url = self.backup_urls.pop_front().unwrap();
+    }
     pub async fn announce(&self, params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
         let mut url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&no_peer_id={}",

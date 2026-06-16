@@ -1,6 +1,13 @@
 use tracing::error;
 
-use crate::config::get_configuration;
+use crate::{
+    config::get_configuration,
+    helpers::generate_random_peer_id,
+    torrent::Torrent,
+    torrent_file::{TorrentFile, info_hash},
+};
+use std::fs;
+use tracing::info;
 
 pub mod bencode;
 pub mod client;
@@ -8,6 +15,9 @@ mod config;
 pub mod error;
 pub mod helpers;
 pub mod models;
+pub mod peer;
+pub mod piece_bag;
+pub mod torrent;
 pub mod torrent_file;
 pub mod tracker;
 
@@ -23,6 +33,16 @@ async fn main() {
         }
     };
 
-    let client = client::Client::new();
-    client.download_from_file(config.torrent_file).await;
+    let mut client = client::Client::new();
+
+    let torrent_file_data = fs::read(&config.torrent_file).unwrap();
+    let torrent_file = bencode::from_bytes::<TorrentFile>(&torrent_file_data).unwrap();
+    info!("torrent file: {:?}", torrent_file.announce);
+    let info_hash = info_hash(&torrent_file_data);
+    let peer_id = generate_random_peer_id();
+    let torrent = Torrent::new(torrent_file, info_hash, peer_id);
+    if let Err(e) = client.add_torrent(torrent).await {
+        error!("{e:#}");
+        return;
+    }
 }

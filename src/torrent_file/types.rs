@@ -11,7 +11,7 @@ pub struct TorrentFileRawInfo {
     pub info: Raw<Info>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TorrentFile {
     pub info: Info,
     pub announce: String,
@@ -29,7 +29,7 @@ pub struct TorrentFile {
     pub encoding: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Info {
     #[serde(rename = "piece length")]
     pub piece_length: u64,
@@ -41,7 +41,7 @@ pub struct Info {
     pub files: Option<Vec<File>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct File {
     pub length: u64,
     pub md5sum: Option<String>,

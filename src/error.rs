@@ -13,6 +13,8 @@ pub enum Error {
     TomlSerError(#[from] toml::ser::Error),
     #[error("bencode error: {0}")]
     BencodeError(#[from] bencode::error::Error),
+    #[error("join error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
     #[error("tracker error: {0}")]
     TrackerError(String),
     #[error("error: {0}")]
