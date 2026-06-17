@@ -102,9 +102,9 @@ impl Torrent {
                 for _ in 0..attempt_count {
                     match tracker.announce(&params).await {
                         Ok(response) => {
-                            tracker.tracker_id = response.tracker_id;
+                            tracker.tracker_id = response.base.tracker_id;
 
-                            if let Some(warning_message) = response.warning_message {
+                            if let Some(warning_message) = response.base.warning_message {
                                 warn!("Tracker warning: {}", warning_message);
                             }
 
@@ -113,13 +113,15 @@ impl Torrent {
                                 available_peers.write().await.extend(peers);
 
                                 tracker.next_run = Instant::now()
-                                    + Duration::from_secs(response.interval.unwrap_or(10) as u64);
+                                    + Duration::from_secs(
+                                        response.base.interval.unwrap_or(10) as u64
+                                    );
                                 tracker.failed_count = 0;
                                 success = true;
                                 break;
                             }
                             warn!("Got no peers from tracker");
-                            if let Some(failure_message) = response.failure_reason {
+                            if let Some(failure_message) = response.base.failure_reason {
                                 warn!("Failure Message: {}", failure_message);
                             }
                         }

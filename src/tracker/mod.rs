@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 use tokio::time::Instant;
 
 use crate::bencode;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 fn url_encode_bytes(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len() * 3);
@@ -64,7 +65,7 @@ pub enum TrackerEvent {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TrackerResponse {
+pub struct TrackerResponseBase {
     #[serde(rename = "failure reason")]
     pub failure_reason: Option<String>,
     #[serde(rename = "warning message")]
@@ -76,7 +77,40 @@ pub struct TrackerResponse {
     pub tracker_id: Option<String>,
     pub complete: Option<u32>,
     pub incomplete: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrackerResponse {
+    #[serde(flatten)]
+    pub base: TrackerResponseBase,
     pub peers: Option<Vec<Peer>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrackerResponseRawPeer {
+    #[serde(flatten)]
+    pub base: TrackerResponseBase,
+    pub peers: Option<Vec<u8>>,
+}
+
+impl TryFrom<TrackerResponseRawPeer> for TrackerResponse {
+    type Error = Error;
+    fn try_from(value: TrackerResponseRawPeer) -> Result<TrackerResponse> {
+        let mut peers = Vec::new();
+
+        if let Some(peer_bytes) = value.peers {
+            peers.extend(peer_bytes.chunks_exact(6).map(|chunk| Peer {
+                peer_id: None,
+                ip: format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]),
+                port: u16::from_be_bytes([chunk[4], chunk[5]]),
+            }));
+        }
+
+        Ok(TrackerResponse {
+            base: value.base,
+            peers: Some(peers),
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq)]
@@ -186,7 +220,13 @@ impl Tracker {
         let client = reqwest::Client::new();
         let res = client.get(&url).send().await?;
         let bytes = res.bytes().await?;
-        let response = bencode::from_bytes::<TrackerResponse>(&bytes)?;
+
+        let response = bencode::from_bytes::<TrackerResponse>(&bytes)
+            .map_err(crate::error::Error::from)
+            .or_else(|_| {
+                let raw = bencode::from_bytes::<TrackerResponseRawPeer>(&bytes)?;
+                TrackerResponse::try_from(raw)
+            })?;
         Ok(response)
     }
 }
