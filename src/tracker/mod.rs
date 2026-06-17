@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use tokio::fs;
 use tokio::time::Instant;
+use tracing::info;
 
 use crate::bencode;
 use crate::error::{Error, Result};
@@ -45,7 +47,7 @@ impl TrackerAnnounceParams {
             uploaded: 0,
             downloaded: 0,
             left: 0,
-            compact: false,
+            compact: true,
             no_peer_id: false,
             event: None,
             ip: None,
@@ -90,21 +92,21 @@ pub struct TrackerResponse {
 pub struct TrackerResponseRawPeer {
     #[serde(flatten)]
     pub base: TrackerResponseBase,
-    pub peers: Option<Vec<u8>>,
+    pub peers: ByteBuf,
 }
 
 impl TryFrom<TrackerResponseRawPeer> for TrackerResponse {
     type Error = Error;
     fn try_from(value: TrackerResponseRawPeer) -> Result<TrackerResponse> {
-        let mut peers = Vec::new();
-
-        if let Some(peer_bytes) = value.peers {
-            peers.extend(peer_bytes.chunks_exact(6).map(|chunk| Peer {
+        let peers: Vec<Peer> = value
+            .peers
+            .chunks_exact(6)
+            .map(|chunk| Peer {
                 peer_id: None,
                 ip: format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]),
                 port: u16::from_be_bytes([chunk[4], chunk[5]]),
-            }));
-        }
+            })
+            .collect();
 
         Ok(TrackerResponse {
             base: value.base,
@@ -190,6 +192,7 @@ impl Tracker {
             params.compact as u8,
             params.no_peer_id as u8,
         );
+        info!("Announcing to {}", url);
 
         if let Some(ref event) = params.event {
             let event_str = match event {

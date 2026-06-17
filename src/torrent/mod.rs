@@ -83,6 +83,14 @@ impl Torrent {
                 heap.push(tracker.to_owned());
             }
 
+            let total_torrent_length = torrent_file.info.length.unwrap_or(
+                torrent_file
+                    .info
+                    .files
+                    .as_ref()
+                    .map(|files| files.iter().map(|f| f.length).sum())
+                    .unwrap_or(0),
+            );
             loop {
                 let mut tracker = heap.pop().unwrap();
                 sleep_until(tracker.next_run).await;
@@ -90,8 +98,7 @@ impl Torrent {
                 let params = TrackerAnnounceParams {
                     downloaded: piece_bag.read().await.downloaded,
                     uploaded: piece_bag.read().await.uploaded,
-                    left: torrent_file.info.length.unwrap_or(u64::MAX)
-                        - piece_bag.read().await.downloaded,
+                    left: total_torrent_length - piece_bag.read().await.downloaded,
                     ..default_params.clone()
                 };
 
