@@ -1,13 +1,12 @@
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     config::get_configuration,
     helpers::generate_random_peer_id,
-    torrent::Torrent,
+    torrent::{Torrent, TorrentEvent},
     torrent_file::{TorrentFile, info_hash},
 };
 use std::fs;
-use tracing::info;
 
 pub mod bencode;
 pub mod client;
@@ -41,8 +40,20 @@ async fn main() {
     let info_hash = info_hash(&torrent_file_data);
     let peer_id = generate_random_peer_id();
     let torrent = Torrent::new(torrent_file, info_hash, peer_id);
-    if let Err(e) = client.add_torrent(torrent).await {
-        error!("{e:#}");
-        return;
+    let mut handle = match client.add_torrent(torrent).await {
+        Ok(h) => h,
+        Err(e) => {
+            error!("{e:#}");
+            return;
+        }
+    };
+
+    while let Some(event) = handle.events.recv().await {
+        match event {
+            TorrentEvent::PeersFound(n) => println!("Peers found: {n}"),
+            TorrentEvent::TrackerWarning(msg) => eprintln!("Tracker warning: {msg}"),
+            TorrentEvent::TrackerFailure(msg) => eprintln!("Tracker failure: {msg}"),
+            TorrentEvent::TrackerError(msg) => eprintln!("Tracker error: {msg}"),
+        }
     }
 }

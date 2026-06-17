@@ -1,5 +1,6 @@
-use crate::bencode;
+use crate::{bencode, torrent::TorrentEvent};
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -17,6 +18,8 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
     #[error("unsupported tracker protocol")]
     UnsupportedTrackerProtocol,
+    #[error("sender error: {0}")]
+    TorrentEventSenderError(#[from] mpsc::error::SendError<TorrentEvent>),
     #[error("tracker error: {0}")]
     TrackerError(String),
     #[error("error: {0}")]

@@ -4,10 +4,22 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::RwLock,
+    sync::{RwLock, mpsc},
     time::{Instant, sleep_until},
 };
 use tracing::{info, warn};
+
+#[derive(Debug)]
+pub enum TorrentEvent {
+    PeersFound(usize),
+    TrackerWarning(String),
+    TrackerFailure(String),
+    TrackerError(String),
+}
+
+pub struct TorrentHandle {
+    pub events: mpsc::Receiver<TorrentEvent>,
+}
 
 use crate::{
     error::Result,
@@ -41,20 +53,21 @@ impl Torrent {
         }
     }
 
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<TorrentHandle> {
         info!("Starting torrent {}", hex_string_hash(&self.info_hash));
         self.prepare_announce_list().await;
 
         let default_params = TrackerAnnounceParams::new(&self.info_hash, &self.peer_id);
+        let (tx, rx) = mpsc::channel(64);
         Self::fetch_peers_in_background(
             self.trackers.clone(),
             self.piece_bag.clone(),
             self.torrent_file.clone(),
             self.available_peers.clone(),
             default_params,
-        )
-        .await?;
-        Ok(())
+            tx,
+        );
+        Ok(TorrentHandle { events: rx })
     }
 
     pub async fn prepare_announce_list(&mut self) {
@@ -76,6 +89,7 @@ impl Torrent {
         torrent_file: Arc<TorrentFile>,
         available_peers: Arc<RwLock<HashSet<TrackerPeer>>>,
         default_params: TrackerAnnounceParams,
+        tx: mpsc::Sender<TorrentEvent>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut heap: BinaryHeap<Tracker> = BinaryHeap::new();
@@ -113,10 +127,13 @@ impl Torrent {
 
                             if let Some(warning_message) = response.base.warning_message {
                                 warn!("Tracker warning: {}", warning_message);
+                                let _ =
+                                    tx.send(TorrentEvent::TrackerWarning(warning_message)).await;
                             }
 
                             if let Some(peers) = response.peers {
                                 info!("Got {} peers from tracker", peers.len());
+                                let _ = tx.send(TorrentEvent::PeersFound(peers.len())).await;
                                 available_peers.write().await.extend(peers);
 
                                 tracker.next_run = Instant::now()
@@ -130,10 +147,13 @@ impl Torrent {
                             warn!("Got no peers from tracker");
                             if let Some(failure_message) = response.base.failure_reason {
                                 warn!("Failure Message: {}", failure_message);
+                                let _ =
+                                    tx.send(TorrentEvent::TrackerFailure(failure_message)).await;
                             }
                         }
                         Err(err) => {
                             warn!("Got error from tracker: {}", err);
+                            let _ = tx.send(TorrentEvent::TrackerError(err.to_string())).await;
                         }
                     }
                     tracker.failed_count += 1;
