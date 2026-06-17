@@ -7,18 +7,7 @@ use tracing::info;
 
 use crate::bencode;
 use crate::error::{Error, Result};
-
-fn url_encode_bytes(bytes: &[u8]) -> String {
-    let mut result = String::with_capacity(bytes.len() * 3);
-    for &b in bytes {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            result.push(b as char);
-        } else {
-            result.push_str(&format!("%{:02X}", b));
-        }
-    }
-    result
-}
+use crate::helpers::url_safe_string_hash;
 
 #[derive(Debug, Clone)]
 pub struct TrackerAnnounceParams {
@@ -182,8 +171,8 @@ impl Tracker {
         let mut url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&no_peer_id={}",
             self.announce_url,
-            url_encode_bytes(&params.info_hash),
-            url_encode_bytes(&params.peer_id),
+            url_safe_string_hash(&params.info_hash),
+            url_safe_string_hash(&params.peer_id),
             params.port,
             params.uploaded,
             params.downloaded,
