@@ -167,7 +167,21 @@ impl Tracker {
         self.backup_urls.push_back(self.announce_url.clone());
         self.announce_url = self.backup_urls.pop_front().unwrap();
     }
+
     pub async fn announce(&self, params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
+        if self.announce_url.starts_with("udp") {
+            self.udp_announce(params).await
+        } else if self.announce_url.starts_with("http") {
+            self.http_announce(params).await
+        } else {
+            Err(Error::UnsupportedTrackerProtocol)
+        }
+    }
+
+    pub async fn udp_announce(&self, _params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
+        unimplemented!("TODO: UDP announce")
+    }
+    pub async fn http_announce(&self, params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
         let mut url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&no_peer_id={}",
             self.announce_url,

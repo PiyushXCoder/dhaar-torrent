@@ -15,6 +15,8 @@ pub enum Error {
     BencodeError(#[from] bencode::error::Error),
     #[error("join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+    #[error("unsupported tracker protocol")]
+    UnsupportedTrackerProtocol,
     #[error("tracker error: {0}")]
     TrackerError(String),
     #[error("error: {0}")]
