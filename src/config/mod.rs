@@ -7,9 +7,9 @@ use tracing::info;
 
 use crate::error::Error;
 
-pub(crate) mod models;
+pub mod models;
 
-pub(crate) fn get_configuration() -> Result<models::CliArgsConfig, Error> {
+pub fn get_configuration() -> Result<models::CliArgsConfig, Error> {
     let mut config_from_cliargs = models::CliArgsConfig::parse();
 
     let config_file_data = match &config_from_cliargs.config_file {
