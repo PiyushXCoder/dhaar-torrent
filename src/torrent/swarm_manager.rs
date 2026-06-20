@@ -67,7 +67,7 @@ impl SwarmManager {
                         Some((dead_peer, _)) = self.orchestrate_rx.recv() => {
                             self.seen.remove(&dead_peer);
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(20)) => {}
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
                     }
                     continue;
                 }
