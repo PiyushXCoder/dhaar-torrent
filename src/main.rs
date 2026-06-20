@@ -44,6 +44,10 @@ async fn main() {
             TorrentEvent::TrackerWarning(msg) => eprintln!("Tracker warning: {msg}"),
             TorrentEvent::TrackerFailure(msg) => eprintln!("Tracker failure: {msg}"),
             TorrentEvent::TrackerError(msg) => eprintln!("Tracker error: {msg}"),
+            TorrentEvent::PeerConnected => println!("Peer connected"),
+            TorrentEvent::PeerDisconnected => println!("Peer disconnected"),
+            TorrentEvent::Downloaded(bytes) => println!("Downloaded: {bytes} bytes"),
+            TorrentEvent::PieceComplete(idx) => println!("Piece {idx} complete"),
         }
     }
 }

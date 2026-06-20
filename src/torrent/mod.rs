@@ -1,13 +1,18 @@
-use std::{
-    collections::{BinaryHeap, HashSet},
-    sync::Arc,
-    time::Duration,
+use std::{collections::HashSet, sync::Arc};
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::task::JoinHandle;
+use tracing::info;
+mod available_peer_manager;
+mod swarm_manager;
+use crate::peer::Peer;
+use crate::{
+    error::Result,
+    helpers::hex_string_hash,
+    piece_bag::PieceBag,
+    torrent::{available_peer_manager::AvailablePeerManager, swarm_manager::SwarmManager},
+    torrent_file::TorrentFile,
+    tracker::{Peer as TrackerPeer, Tracker, TrackerAnnounceParams},
 };
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::{Instant, sleep_until},
-};
-use tracing::{info, warn};
 
 #[derive(Debug)]
 pub enum TorrentEvent {
@@ -15,20 +20,16 @@ pub enum TorrentEvent {
     TrackerWarning(String),
     TrackerFailure(String),
     TrackerError(String),
+    PeerConnected,
+    PeerDisconnected,
+    Downloaded(u64),
+    PieceComplete(u32),
 }
 
 pub struct TorrentHandle {
     pub events: mpsc::Receiver<TorrentEvent>,
+    pub task: JoinHandle<(Result<()>, Result<()>)>,
 }
-
-use crate::{
-    error::Result,
-    helpers::hex_string_hash,
-    peer::Peer,
-    piece_bag::PieceBag,
-    torrent_file::TorrentFile,
-    tracker::{Peer as TrackerPeer, Tracker, TrackerAnnounceParams},
-};
 
 pub struct Torrent {
     pub torrent_file: Arc<TorrentFile>,
@@ -36,8 +37,8 @@ pub struct Torrent {
     pub peer_id: [u8; 20],
     pub trackers: Arc<RwLock<Vec<Tracker>>>,
     pub available_peers: Arc<RwLock<HashSet<TrackerPeer>>>,
-    pub swarm: Vec<Peer>,
-    pub piece_bag: Arc<RwLock<PieceBag>>,
+    pub swarm: Arc<RwLock<Vec<Arc<Mutex<Peer>>>>>,
+    pub piece_bag: Arc<PieceBag>,
 }
 
 impl Torrent {
@@ -48,8 +49,8 @@ impl Torrent {
             peer_id,
             trackers: Arc::new(RwLock::new(Vec::new())),
             available_peers: Arc::new(RwLock::new(HashSet::new())),
-            swarm: Vec::new(),
-            piece_bag: Arc::new(RwLock::new(PieceBag::new(hex_string_hash(&info_hash)))),
+            swarm: Arc::new(RwLock::new(Vec::new())),
+            piece_bag: Arc::new(PieceBag::new(hex_string_hash(&info_hash))),
         }
     }
 
@@ -58,16 +59,41 @@ impl Torrent {
         self.prepare_announce_list().await;
 
         let default_params = TrackerAnnounceParams::new(&self.info_hash, &self.peer_id);
-        let (tx, rx) = mpsc::channel(64);
-        Self::fetch_peers_in_background(
+        let (torrent_event_tx, torrent_event_rx) = mpsc::channel(64);
+        let (trackers, piece_bag, torrent_file, available_peers, swarm) = (
             self.trackers.clone(),
             self.piece_bag.clone(),
             self.torrent_file.clone(),
             self.available_peers.clone(),
-            default_params,
-            tx,
+            self.swarm.clone(),
         );
-        Ok(TorrentHandle { events: rx })
+        let (info_hash, peer_id) = (self.info_hash, self.peer_id);
+        let mut available_peer_manager = AvailablePeerManager::new(
+            torrent_event_tx.clone(),
+            trackers,
+            piece_bag.clone(),
+            torrent_file,
+            available_peers.clone(),
+            default_params,
+        );
+
+        let mut swarm_manager = SwarmManager::new(
+            info_hash,
+            peer_id,
+            available_peers,
+            swarm,
+            piece_bag,
+            torrent_event_tx,
+        );
+
+        let join_handle = tokio::spawn(async move {
+            tokio::join!(available_peer_manager.start(), swarm_manager.start())
+        });
+
+        Ok(TorrentHandle {
+            events: torrent_event_rx,
+            task: join_handle,
+        })
     }
 
     pub async fn prepare_announce_list(&mut self) {
@@ -81,100 +107,5 @@ impl Torrent {
                 trackers.push(Tracker::new(first, rest.to_vec()));
             }
         }
-    }
-
-    fn fetch_peers_in_background(
-        trackers: Arc<RwLock<Vec<Tracker>>>,
-        piece_bag: Arc<RwLock<PieceBag>>,
-        torrent_file: Arc<TorrentFile>,
-        available_peers: Arc<RwLock<HashSet<TrackerPeer>>>,
-        default_params: TrackerAnnounceParams,
-        tx: mpsc::Sender<TorrentEvent>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut heap: BinaryHeap<Tracker> = BinaryHeap::new();
-            for tracker in trackers.read().await.iter() {
-                heap.push(tracker.to_owned());
-            }
-
-            let total_torrent_length = torrent_file.info.length.unwrap_or(
-                torrent_file
-                    .info
-                    .files
-                    .as_ref()
-                    .map(|files| files.iter().map(|f| f.length).sum())
-                    .unwrap_or(0),
-            );
-            loop {
-                let mut tracker = heap.pop().unwrap();
-                sleep_until(tracker.next_run).await;
-
-                let params = TrackerAnnounceParams {
-                    downloaded: piece_bag.read().await.downloaded,
-                    uploaded: piece_bag.read().await.uploaded,
-                    left: total_torrent_length - piece_bag.read().await.downloaded,
-                    ..default_params.clone()
-                };
-
-                let mut success = false;
-                info!("Announcing to tracker {}", tracker.announce_url);
-
-                let attempt_count = tracker.backup_urls.len() + 1;
-                for _ in 0..attempt_count {
-                    match tracker.announce(&params).await {
-                        Ok(response) => {
-                            tracker.tracker_id = response.base.tracker_id;
-
-                            if let Some(warning_message) = response.base.warning_message {
-                                warn!("Tracker warning: {}", warning_message);
-                                let _ =
-                                    tx.send(TorrentEvent::TrackerWarning(warning_message)).await;
-                            }
-
-                            if let Some(peers) = response.peers {
-                                info!("Got {} peers from tracker", peers.len());
-                                let _ = tx.send(TorrentEvent::PeersFound(peers.len())).await;
-                                available_peers.write().await.extend(peers);
-
-                                tracker.next_run = Instant::now()
-                                    + Duration::from_secs(
-                                        response.base.interval.unwrap_or(10) as u64
-                                    );
-                                tracker.failed_count = 0;
-                                success = true;
-                                break;
-                            }
-                            warn!("Got no peers from tracker");
-                            if let Some(failure_message) = response.base.failure_reason {
-                                warn!("Failure Message: {}", failure_message);
-                                let _ =
-                                    tx.send(TorrentEvent::TrackerFailure(failure_message)).await;
-                            }
-                        }
-                        Err(err) => {
-                            warn!("Got error from tracker: {}", err);
-                            let _ = tx.send(TorrentEvent::TrackerError(err.to_string())).await;
-                        }
-                    }
-                    tracker.failed_count += 1;
-                    tracker.next_run =
-                        Instant::now() + Duration::from_secs(10 * tracker.failed_count as u64);
-                    tracker.rotate_url();
-                }
-
-                if !success {
-                    warn!("Failed to get peers from all trackers");
-                }
-                let sleep_dur = tracker
-                    .next_run
-                    .saturating_duration_since(tokio::time::Instant::now());
-                info!(
-                    "Sleeping tracker till {}",
-                    (chrono::Local::now() + chrono::Duration::from_std(sleep_dur).unwrap())
-                        .format("%Y-%m-%d %H:%M:%S %Z")
-                );
-                heap.push(tracker);
-            }
-        })
     }
 }
