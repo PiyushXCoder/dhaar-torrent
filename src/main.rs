@@ -24,8 +24,7 @@ async fn main() {
     let mut client = Client::new();
 
     let torrent_file_data = fs::read(&config.torrent_file).unwrap();
-    let torrent_file =
-        dhaar_torrent::bencode::from_bytes::<TorrentFile>(&torrent_file_data).unwrap();
+    let torrent_file = bencode::from_bytes::<TorrentFile>(&torrent_file_data).unwrap();
     info!("torrent file: {:?}", torrent_file.announce);
     let info_hash = info_hash(&torrent_file_data);
     let peer_id = generate_random_peer_id();

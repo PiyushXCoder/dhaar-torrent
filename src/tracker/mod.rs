@@ -5,9 +5,9 @@ use serde_bytes::ByteBuf;
 use tokio::time::Instant;
 use tracing::info;
 
-use crate::bencode;
 use crate::error::{Error, Result};
 use crate::helpers::url_safe_string_hash;
+use bencode;
 
 #[derive(Debug, Clone)]
 pub struct TrackerAnnounceParams {

@@ -1,4 +1,4 @@
-use crate::{bencode, torrent::TorrentEvent};
+use crate::torrent::TorrentEvent;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
