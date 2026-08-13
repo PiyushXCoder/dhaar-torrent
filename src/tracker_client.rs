@@ -10,7 +10,7 @@ use crate::helpers::url_safe_string_hash;
 use bencode;
 
 #[derive(Debug, Clone)]
-pub struct TrackerAnnounceParams {
+pub struct TrackerAnnounceQuery {
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
     pub port: u16,
@@ -26,9 +26,9 @@ pub struct TrackerAnnounceParams {
     pub tracker_id: Option<String>,
 }
 
-impl TrackerAnnounceParams {
+impl TrackerAnnounceQuery {
     pub fn new(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
-        TrackerAnnounceParams {
+        TrackerAnnounceQuery {
             info_hash: *info_hash,
             peer_id: *peer_id,
             port: 6889,
@@ -125,7 +125,7 @@ impl std::hash::Hash for Peer {
 }
 
 #[derive(Debug, Eq, Clone)]
-pub struct Tracker {
+pub struct TrackerClient {
     pub announce_url: String,
     pub backup_urls: VecDeque<String>,
     pub next_run: Instant,
@@ -133,28 +133,28 @@ pub struct Tracker {
     pub tracker_id: Option<String>,
 }
 
-impl PartialEq for Tracker {
+impl PartialEq for TrackerClient {
     fn eq(&self, other: &Self) -> bool {
         self.next_run == other.next_run
     }
 }
 
-impl Ord for Tracker {
+impl Ord for TrackerClient {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.next_run.cmp(&other.next_run).reverse()
     }
 }
 
-impl PartialOrd for Tracker {
+impl PartialOrd for TrackerClient {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Tracker {
-    pub fn new(announce_url: &str, backup_urls: Vec<String>) -> Tracker {
+impl TrackerClient {
+    pub fn new(announce_url: &str, backup_urls: Vec<String>) -> TrackerClient {
         let backup_urls = VecDeque::from(backup_urls);
-        Tracker {
+        TrackerClient {
             announce_url: announce_url.to_string(),
             backup_urls,
             next_run: Instant::now(),
@@ -168,7 +168,7 @@ impl Tracker {
         self.announce_url = self.backup_urls.pop_front().unwrap();
     }
 
-    pub async fn announce(&self, params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
+    pub async fn announce(&self, params: &TrackerAnnounceQuery) -> Result<TrackerResponse> {
         if self.announce_url.starts_with("udp") {
             self.udp_announce(params).await
         } else if self.announce_url.starts_with("http") {
@@ -178,10 +178,10 @@ impl Tracker {
         }
     }
 
-    pub async fn udp_announce(&self, _params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
+    pub async fn udp_announce(&self, _params: &TrackerAnnounceQuery) -> Result<TrackerResponse> {
         unimplemented!("TODO: UDP announce")
     }
-    pub async fn http_announce(&self, params: &TrackerAnnounceParams) -> Result<TrackerResponse> {
+    pub async fn http_announce(&self, params: &TrackerAnnounceQuery) -> Result<TrackerResponse> {
         let mut url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}&no_peer_id={}",
             self.announce_url,

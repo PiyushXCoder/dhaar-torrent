@@ -1,6 +1,4 @@
-use crate::torrent::TorrentEvent;
 use thiserror::Error;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -22,8 +20,6 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
     #[error("unsupported tracker protocol")]
     UnsupportedTrackerProtocol,
-    #[error("sender error: {0}")]
-    TorrentEventSenderError(#[from] mpsc::error::SendError<TorrentEvent>),
     #[error("semaphore aquire error: {0}")]
     SemaphoreAquireError(#[from] tokio::sync::AcquireError),
     #[error("chrono out of range error: {0}")]
