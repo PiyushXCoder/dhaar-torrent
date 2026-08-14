@@ -1,11 +1,6 @@
 use dhaar_torrent::{
-    config::get_configuration,
-    helpers::generate_random_peer_id,
-    torrent_parser::TorrentParser,
-    tracker::{
-        TcpTrackerClient, tracker_client::TrackerClient,
-        tracker_client_messages::TrackerAnnounceQuery,
-    },
+    config::get_configuration, helpers::generate_random_peer_id, torrent_parser::TorrentParser,
+    tracker::tracker_manager::TrackerManager,
 };
 use tracing::error;
 
@@ -28,9 +23,13 @@ async fn main() {
 
     println!("{:#?}", torrent.info.name);
 
-    let tracker_client = TcpTrackerClient::new(&torrent.announce);
     let peer_id = generate_random_peer_id();
-    let query = TrackerAnnounceQuery::new(&torrent.info_hash, &peer_id);
-    let tracker_response = tracker_client.announce(&query).await.unwrap();
-    println!("{:#?}", tracker_response);
+    let tracker_manager = TrackerManager::new(vec![torrent.announce], &torrent.info_hash, &peer_id);
+    let (peers, _join_handle) = tracker_manager.start_announcing().await.unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    for peer in peers.peers.lock().await.iter() {
+        println!("{:#?}", peer);
+    }
 }
