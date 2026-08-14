@@ -1,5 +1,5 @@
 use sha1::Digest;
-use std::path::PathBuf;
+use std::path::Path;
 
 use bencode::{
     Raw,
@@ -34,7 +34,7 @@ pub struct File {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct TorrentFileRawInfo {
+struct TorrentFileRawInfo {
     pub info: Raw<Info>,
 }
 
@@ -65,7 +65,7 @@ impl Torrent {
         Ok(torrent)
     }
 
-    pub(crate) fn parse_from_file_path(file_path: &PathBuf) -> crate::error::Result<Torrent> {
+    pub(crate) fn parse_from_file_path(file_path: &Path) -> crate::error::Result<Torrent> {
         let torrent_data = std::fs::read(file_path).unwrap();
         let mut torrent = bencode::from_bytes::<Torrent>(&torrent_data).unwrap();
         torrent.info_hash = info_hash(&torrent_data);

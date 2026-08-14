@@ -1,4 +1,4 @@
-use dhaar_torrent::config::get_configuration;
+use dhaar_torrent::{config::get_configuration, torrent_parser::TorrentParser};
 use tracing::error;
 
 #[tokio::main]
@@ -12,4 +12,11 @@ async fn main() {
             return;
         }
     };
+
+    let torrent = dhaar_torrent::torrent_parser::TorrentFileParser::parse_from_file_path(
+        &config.torrent_file,
+    )
+    .unwrap();
+
+    println!("{:#?}", torrent);
 }
