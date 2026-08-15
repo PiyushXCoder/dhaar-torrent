@@ -1,7 +1,9 @@
 mod decoder;
 mod encoder;
 
+#[allow(unused_imports)]
 pub use decoder::*;
+#[allow(unused_imports)]
 pub use encoder::*;
 
 pub struct WireCodec {
