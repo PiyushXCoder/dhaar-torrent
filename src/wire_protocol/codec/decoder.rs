@@ -1,4 +1,4 @@
-use super::super::{Handshake, Message, WireItem};
+use super::super::{Bitfield, Handshake, Message, WireItem};
 use super::{CodecState, WireCodec};
 use std::io;
 use tokio_util::bytes::{self, Buf};
@@ -124,7 +124,7 @@ impl Decoder for WireCodec {
                         }
                         Message::Have(u32::from_be_bytes(rest[..4].try_into().unwrap()))
                     }
-                    5 => Message::Bitfield(rest.to_vec()),
+                    5 => Message::Bitfield(Bitfield(rest.to_vec())),
                     6 => {
                         if rest.len() < 12 {
                             return Err(io::Error::new(

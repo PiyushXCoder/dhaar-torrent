@@ -31,7 +31,7 @@ impl Encoder<WireItem> for WireCodec {
                     Message::Interested => (2, 0),
                     Message::NotInterested => (3, 0),
                     Message::Have(_) => (4, 4),
-                    Message::Bitfield(bitfield) => (5, bitfield.len()),
+                    Message::Bitfield(bitfield) => (5, bitfield.0.len()),
                     Message::Request { .. } => (6, 12),
                     Message::Piece { block, .. } => (7, 8 + block.len()),
                     Message::Cancel { .. } => (8, 12),
@@ -48,7 +48,7 @@ impl Encoder<WireItem> for WireCodec {
                     | Message::Interested
                     | Message::NotInterested => {}
                     Message::Have(index) => dst.put_u32(index),
-                    Message::Bitfield(bitfield) => dst.put_slice(&bitfield),
+                    Message::Bitfield(bitfield) => dst.put_slice(&bitfield.0),
                     Message::Request {
                         index,
                         begin,

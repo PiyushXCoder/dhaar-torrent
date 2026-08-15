@@ -16,7 +16,7 @@ pub enum Message {
     Interested,
     NotInterested,
     Have(u32),
-    Bitfield(Vec<u8>),
+    Bitfield(Bitfield),
     Request {
         index: u32,
         begin: u32,
@@ -44,3 +44,5 @@ pub enum WireItem {
     /// A normal wire message.
     Message(Message),
 }
+
+pub struct Bitfield(pub Vec<u8>);
