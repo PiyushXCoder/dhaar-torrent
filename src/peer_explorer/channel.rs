@@ -1,8 +1,8 @@
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::peer_explorer::tracker::tracker_client_messages::Peer;
+use crate::peer_explorer::Peer;
 
-const PEER_EXPLORER_CHANNEL_SIZE: usize = 256;
+const CHANNEL_SIZE: usize = 256;
 
 #[derive(Debug)]
 pub enum PeerExplorerChannelMessage {
@@ -15,5 +15,20 @@ pub fn new_peer_explorer_channel() -> (
     Sender<PeerExplorerChannelMessage>,
     Receiver<PeerExplorerChannelMessage>,
 ) {
-    channel(PEER_EXPLORER_CHANNEL_SIZE)
+    channel(CHANNEL_SIZE)
+}
+
+#[derive(Debug)]
+pub enum PeerSourceChannelMessage {
+    PeerFound(Peer),
+}
+
+pub type PeerSourceChannelSender = Sender<PeerSourceChannelMessage>;
+pub type PeerSourceChannelReceiver = Receiver<PeerSourceChannelMessage>;
+
+pub fn new_peer_source_channel() -> (
+    Sender<PeerSourceChannelMessage>,
+    Receiver<PeerSourceChannelMessage>,
+) {
+    channel(CHANNEL_SIZE)
 }

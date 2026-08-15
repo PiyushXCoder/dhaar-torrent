@@ -116,3 +116,13 @@ impl std::hash::Hash for Peer {
         self.port.hash(state);
     }
 }
+
+impl Into<crate::peer_explorer::Peer> for Peer {
+    fn into(self) -> crate::peer_explorer::Peer {
+        crate::peer_explorer::Peer {
+            peer_id: self.peer_id,
+            ip: self.ip,
+            port: self.port,
+        }
+    }
+}

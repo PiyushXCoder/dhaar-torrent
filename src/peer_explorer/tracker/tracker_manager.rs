@@ -7,7 +7,8 @@ use tokio::time::Instant;
 use tracing::{debug, error, info};
 
 use crate::error::Result;
-use crate::peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelSender};
+use crate::peer_explorer::PeerSource;
+use crate::peer_explorer::channel::{PeerSourceChannelMessage, PeerSourceChannelSender};
 
 use super::tcp_tracker_client::TcpTrackerClient;
 use super::tracker_client::TrackerClient;
@@ -17,25 +18,24 @@ pub struct TrackerManager {
     announce_urls: Vec<String>,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
-    peer_explorer_channel_sender: PeerExplorerChannelSender,
 }
 
 impl TrackerManager {
-    pub fn new(
-        announce_urls: Vec<String>,
-        info_hash: &[u8; 20],
-        peer_id: &[u8; 20],
-        peer_explorer_channel_sender: PeerExplorerChannelSender,
-    ) -> Self {
+    pub fn new(announce_urls: Vec<String>, info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
         Self {
             announce_urls,
             info_hash: *info_hash,
             peer_id: *peer_id,
-            peer_explorer_channel_sender,
         }
     }
+}
 
-    pub async fn start_announcing(&self) -> Result<JoinHandle<()>> {
+#[async_trait::async_trait]
+impl PeerSource for TrackerManager {
+    async fn start(
+        &self,
+        peer_source_channel_sender: PeerSourceChannelSender,
+    ) -> Result<JoinHandle<()>> {
         // let peer_pool = PeerPool::default();
         let mut scheduler_heap = BinaryHeap::new();
 
@@ -56,9 +56,8 @@ impl TrackerManager {
         }
 
         let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id);
-        let peer_explorer_channel_sender = self.peer_explorer_channel_sender.clone();
         let join_handle = tokio::spawn(async move {
-            announce_tracker(&mut scheduler_heap, &query, &peer_explorer_channel_sender).await;
+            announce_tracker(&mut scheduler_heap, &query, &peer_source_channel_sender).await;
         });
         Ok(join_handle)
     }
@@ -67,7 +66,7 @@ impl TrackerManager {
 async fn announce_tracker(
     scheduler_heap: &mut BinaryHeap<Reverse<Tracker>>,
     query: &TrackerAnnounceQuery,
-    peer_explorer_channel_sender: &PeerExplorerChannelSender,
+    peer_explorer_channel_sender: &PeerSourceChannelSender,
 ) {
     info!("Starting to announce");
     loop {
@@ -108,7 +107,7 @@ async fn announce_tracker(
         );
         for peer in peers {
             peer_explorer_channel_sender
-                .send(PeerExplorerChannelMessage::PeerFound(peer))
+                .send(PeerSourceChannelMessage::PeerFound(peer.into()))
                 .await
                 .unwrap();
         }
