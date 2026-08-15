@@ -4,3 +4,4 @@ pub mod tracker_client_messages;
 pub mod tracker_manager;
 
 pub use tcp_tracker_client::TcpTrackerClient;
+pub use tracker_manager::TrackerManager;

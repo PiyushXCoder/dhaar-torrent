@@ -1,6 +1,5 @@
 pub mod config;
 pub mod error;
 pub mod helpers;
-pub mod shared;
+pub mod peer_explorer;
 pub mod torrent_parser;
-pub mod tracker;
