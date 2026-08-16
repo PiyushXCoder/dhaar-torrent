@@ -25,6 +25,7 @@ bencode = { path = "crates/bencode" }
 chrono = { workspace = true }
 clap = { version = "4.6.1", features = ["derive"] }
 derive_more = { workspace = true }
+futures = "0.3.34"
 home-config = "0.7.0"
 merge = "0.2.0"
 num-traits = { workspace = true }

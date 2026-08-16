@@ -1,8 +1,6 @@
 use crate::{
-    peer_explorer::{
-        Peer,
-        channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
-    },
+    peer_connection::PeerConnection,
+    peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
     piece_manager::channel::PieceManagerChannelSender,
 };
 use channels::PeerManagerChannelMessage;
@@ -66,24 +64,19 @@ where
                         if active < MAX_PEERS && self.peer_slection_strategy.peek().is_some() =>
                     {
                         active += 1;
-                        tokio::spawn(peer_conncection(
+
+                        let peer_connection = PeerConnection::connect(
                             attempt.peer,
                             peer_manager_channel_sender.clone(),
-                        ));
+                            piece_manager_channel_sender.clone(),
+                            &self.info_hash,
+                            &self.peer_id,
+                        )
+                        .await;
+                        tokio::spawn(peer_connection.start());
                     }
                 }
             }
         });
     }
-}
-
-async fn peer_conncection(
-    peer: Peer,
-    peer_manager_channel_sender: channels::PeerManagerChannelSender,
-) {
-    println!("Connecting to peer {} {}", peer.ip, peer.port);
-    peer_manager_channel_sender
-        .send(PeerManagerChannelMessage::Closing(peer))
-        .await
-        .unwrap();
 }
