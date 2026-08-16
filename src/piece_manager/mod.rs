@@ -2,15 +2,21 @@ use serde_bytes::ByteBuf;
 use sha1::Digest;
 
 pub mod channel;
+pub mod piece_writer;
 
 use crate::wire_protocol::Bitfield;
 use channel::PieceManagerMessage;
 
 const BLOCK_SIZE: u64 = 16 * 1024;
 
-pub struct PieceManager {
+pub struct PieceManager<E, W>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+{
     piece_length: u64,
     pieces: Vec<Piece>,
+    piece_writer: W,
 }
 
 pub struct Piece {
@@ -44,8 +50,12 @@ impl Piece {
     }
 }
 
-impl PieceManager {
-    pub fn new(piece_hashes: ByteBuf, piece_length: u64) -> Self {
+impl<E, W> PieceManager<E, W>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+{
+    pub fn new(piece_hashes: ByteBuf, piece_length: u64, piece_writer: W) -> Self {
         let piceces = piece_hashes
             .chunks(20)
             .map(|hash| Piece {
@@ -60,6 +70,7 @@ impl PieceManager {
         Self {
             piece_length,
             pieces: piceces,
+            piece_writer,
         }
     }
 
@@ -100,14 +111,15 @@ impl PieceManager {
                         block_index,
                         block_data,
                     } => {
-                        self.receive_block(piece_index, block_index, block_data);
+                        self.receive_block(piece_index, block_index, block_data)
+                            .await;
                     }
                     PieceManagerMessage::VerifyPiece {
                         piece_index,
                         response_sender,
                     } => {
                         response_sender
-                            .send(self.verify_piece(piece_index))
+                            .send(self.verify_piece(piece_index).await)
                             .unwrap();
                     }
                     PieceManagerMessage::CompletePiece {
@@ -172,7 +184,7 @@ impl PieceManager {
         Some(index as u64)
     }
 
-    fn receive_block(&mut self, piece_index: u64, block_index: u64, block_data: Vec<u8>) {
+    async fn receive_block(&mut self, piece_index: u64, block_index: u64, block_data: Vec<u8>) {
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
         };
@@ -180,7 +192,10 @@ impl PieceManager {
             return;
         };
         let offset = block_index as usize * block_length as usize;
-        // TODO: Implement write to file
+        self.piece_writer
+            .write(piece_index, offset as u64, block_data)
+            .await
+            .unwrap();
         if let Some(blocks) = piece.blocks.as_mut() {
             if let Some(block) = blocks.get_mut(block_index as usize) {
                 block.complete = true;
@@ -188,14 +203,15 @@ impl PieceManager {
         }
     }
 
-    fn verify_piece(&self, piece_index: u64) -> bool {
+    async fn verify_piece(&self, piece_index: u64) -> bool {
         let Some(piece) = self.pieces.get(piece_index as usize) else {
             return false;
         };
-        // TODO: Implement read from file
-        // let digest: [u8; 20] = sha1::Sha1::digest(data).into();
-        // digest == piece.hash
-        false
+        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+            return false;
+        };
+        let digest: [u8; 20] = sha1::Sha1::digest(&data).into();
+        digest == piece.hash
     }
 
     fn complete_piece(&mut self, piece_index: u64) -> bool {
