@@ -30,11 +30,8 @@ async fn main() {
 
     let peer_id = generate_random_peer_id();
     let tracker_manager = TrackerManager::new(vec![torrent.announce], &torrent.info_hash, &peer_id);
-    let mut peer_explorer = PeerExplorer::new(
-        peer_explorer_channel_sender,
-        vec![Box::new(tracker_manager)],
-    );
-    peer_explorer.start().await;
+    let mut peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
+    peer_explorer.start(peer_explorer_channel_sender).await;
 
     while let Some(message) = peer_explorer_channel_receiver.recv().await {
         println!("{:?}", message);

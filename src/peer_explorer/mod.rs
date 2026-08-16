@@ -9,22 +9,18 @@ pub mod channel;
 pub mod tracker;
 
 pub struct PeerExplorer {
-    pub peer_explorer_channel_sender: channel::PeerExplorerChannelSender,
     pub peer_sources: Vec<Box<dyn PeerSource>>,
 }
 
 impl PeerExplorer {
-    pub fn new(
-        peer_explorer_channel_sender: channel::PeerExplorerChannelSender,
-        peer_sources: Vec<Box<dyn PeerSource>>,
-    ) -> PeerExplorer {
-        PeerExplorer {
-            peer_explorer_channel_sender,
-            peer_sources,
-        }
+    pub fn new(peer_sources: Vec<Box<dyn PeerSource>>) -> PeerExplorer {
+        PeerExplorer { peer_sources }
     }
 
-    pub async fn start(&mut self) {
+    pub async fn start(
+        &mut self,
+        peer_explorer_channel_sender: channel::PeerExplorerChannelSender,
+    ) {
         let (peer_source_channel_sender, mut peer_source_channel_receiver) =
             channel::new_peer_source_channel();
 
@@ -34,7 +30,6 @@ impl PeerExplorer {
             }
         }
 
-        let peer_explorer_channel_sender = self.peer_explorer_channel_sender.clone();
         let mut dedup = HashSet::new();
         tokio::spawn(async move {
             while let Some(message) = peer_source_channel_receiver.recv().await {

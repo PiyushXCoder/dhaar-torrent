@@ -36,7 +36,6 @@ impl PeerSource for TrackerManager {
         &self,
         peer_source_channel_sender: PeerSourceChannelSender,
     ) -> Result<JoinHandle<()>> {
-        // let peer_pool = PeerPool::default();
         let mut scheduler_heap = BinaryHeap::new();
 
         let trackers_clients: Vec<Tracker> = self
