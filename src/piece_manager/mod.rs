@@ -55,7 +55,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
     W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
-    pub fn new(piece_hashes: ByteBuf, piece_length: u64, piece_writer: W) -> Self {
+    pub fn new(piece_hashes: &ByteBuf, piece_length: u64, piece_writer: W) -> Self {
         let piceces = piece_hashes
             .chunks(20)
             .map(|hash| Piece {

@@ -34,18 +34,18 @@ pub struct DiskPieceWriter {
 impl DiskPieceWriter {
     pub fn new(
         piece_length: u64,
-        name: String,
+        name: &String,
         length: Option<u64>,
-        md5sum: Option<String>,
-        files: Option<Vec<TorrentFile>>,
+        md5sum: &Option<String>,
+        files: &Option<Vec<TorrentFile>>,
     ) -> Self {
         Self {
             temp_file: PathBuf::new(),
             piece_length,
-            name,
+            name: name.clone(),
             length,
-            md5sum,
-            files,
+            md5sum: md5sum.clone(),
+            files: files.clone(),
         }
     }
 }

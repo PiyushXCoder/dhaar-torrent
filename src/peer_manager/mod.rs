@@ -1,6 +1,9 @@
-use crate::peer_explorer::{
-    Peer,
-    channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
+use crate::{
+    peer_explorer::{
+        Peer,
+        channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
+    },
+    piece_manager::channel::PieceManagerChannelSender,
 };
 use channels::PeerManagerChannelMessage;
 
@@ -30,7 +33,11 @@ where
         }
     }
 
-    pub async fn start(mut self, mut peer_explorer_channel_receiver: PeerExplorerChannelReceiver) {
+    pub async fn start(
+        mut self,
+        mut peer_explorer_channel_receiver: PeerExplorerChannelReceiver,
+        piece_manager_channel_sender: PieceManagerChannelSender,
+    ) {
         let (peer_manager_channel_sender, mut peer_manager_channel_receiver) =
             channels::new_peer_manager_channel();
 
