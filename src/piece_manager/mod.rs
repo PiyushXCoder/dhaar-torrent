@@ -114,6 +114,15 @@ where
                         self.receive_block(piece_index, block_index, block_data)
                             .await;
                     }
+                    PieceManagerMessage::ReadBlock {
+                        piece_index,
+                        block_index,
+                        response_sender,
+                    } => {
+                        response_sender
+                            .send(self.read_block(piece_index, block_index).await)
+                            .unwrap();
+                    }
                     PieceManagerMessage::VerifyPiece {
                         piece_index,
                         response_sender,
@@ -201,6 +210,18 @@ where
                 block.complete = true;
             }
         }
+    }
+
+    async fn read_block(&self, piece_index: u64, block_index: u64) -> Vec<u8> {
+        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+            return Vec::new();
+        };
+        let offset = (block_index * BLOCK_SIZE) as usize;
+        if offset >= data.len() {
+            return Vec::new();
+        }
+        let end = (offset + BLOCK_SIZE as usize).min(data.len());
+        data[offset..end].to_vec()
     }
 
     async fn verify_piece(&self, piece_index: u64) -> bool {

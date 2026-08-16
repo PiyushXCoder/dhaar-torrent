@@ -29,6 +29,11 @@ pub enum PieceManagerMessage {
         block_index: u64,
         block_data: Vec<u8>,
     },
+    ReadBlock {
+        piece_index: u64,
+        block_index: u64,
+        response_sender: OneShotSender<Vec<u8>>,
+    },
     VerifyPiece {
         piece_index: u64,
         response_sender: OneShotSender<bool>,
