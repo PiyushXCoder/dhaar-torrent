@@ -45,4 +45,14 @@ pub enum WireItem {
     Message(Message),
 }
 
+#[derive(Debug)]
 pub struct Bitfield(pub Vec<u8>);
+
+impl Bitfield {
+    pub fn has_piece(&self, index: usize) -> bool {
+        match self.0.get(index / 8) {
+            Some(byte) => (byte >> (7 - (index % 8))) & 1 == 1,
+            None => false,
+        }
+    }
+}
