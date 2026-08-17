@@ -8,7 +8,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
-use tracing::error;
+use tracing::{debug, error};
 
 pub struct PeerConnection {
     pub peer: Option<Peer>,
@@ -74,9 +74,9 @@ impl PeerConnection {
         self.handshake(&mut framed).await;
 
         tokio::spawn(async move {
-            loop {
-                todo!()
-            }
+            // loop {
+            //     todo!()
+            // }
             #[allow(unreachable_code)]
             self.close().await;
         });
@@ -127,67 +127,72 @@ impl PeerConnection {
             return false;
         }
 
-        match framed.next().await {
-            Some(Ok(WireItem::HandshakePartial { info_hash })) if info_hash == self.info_hash => {}
-            _ => {
-                error!("Handshake failed: info_hash mismatch or connection closed");
-                self.close().await;
-                return false;
-            }
-        }
-
-        match framed.next().await {
-            Some(Ok(WireItem::Handshake(handshake))) => {
-                if let Some(peer) = self.peer.as_mut() {
-                    peer.peer_id = Some(handshake.peer_id);
+        loop {
+            match framed.next().await {
+                Some(Ok(WireItem::HandshakePartial { info_hash })) => {
+                    if info_hash != self.info_hash {
+                        error!("Handshake failed: info_hash mismatch");
+                        self.close().await;
+                        return false;
+                    }
                 }
-                true
-            }
-            _ => {
-                error!("Handshake failed: did not receive full handshake");
-                self.close().await;
-                false
+                Some(Ok(WireItem::Handshake(handshake))) => {
+                    let Some(peer) = self.peer.as_mut() else {
+                        error!("Handshake failed: outbound connection missing peer");
+                        self.close().await;
+                        return false;
+                    };
+                    peer.peer_id = Some(handshake.peer_id);
+                    debug!("Outbound handshake complete with {}:{}", peer.ip, peer.port);
+                    return true;
+                }
+                _ => {
+                    error!("Handshake failed: unexpected message or connection closed");
+                    self.close().await;
+                    return false;
+                }
             }
         }
     }
 
     async fn handshake_inbound(&mut self, framed: &mut Framed<TcpStream, WireCodec>) -> bool {
-        match framed.next().await {
-            Some(Ok(WireItem::HandshakePartial { info_hash })) if info_hash == self.info_hash => {}
-            _ => {
-                error!("Handshake failed: unknown info_hash or connection closed");
-                self.close().await;
-                return false;
-            }
-        }
-
-        if let Err(e) = framed.send(WireItem::Handshake(self.our_handshake())).await {
-            error!("Failed to send handshake: {}", e);
-            self.close().await;
-            return false;
-        }
-
-        match framed.next().await {
-            Some(Ok(WireItem::Handshake(handshake))) => {
-                let addr = match framed.get_ref().peer_addr() {
-                    Ok(addr) => addr,
-                    Err(e) => {
-                        error!("Failed to get peer address: {}", e);
+        loop {
+            match framed.next().await {
+                Some(Ok(WireItem::HandshakePartial { info_hash })) => {
+                    if info_hash != self.info_hash {
+                        error!("Handshake failed: unknown info_hash");
                         self.close().await;
                         return false;
                     }
-                };
-                self.peer = Some(Peer {
-                    peer_id: Some(handshake.peer_id),
-                    ip: addr.ip().to_string(),
-                    port: addr.port(),
-                });
-                true
-            }
-            _ => {
-                error!("Handshake failed: did not receive full handshake");
-                self.close().await;
-                false
+                    if let Err(e) = framed.send(WireItem::Handshake(self.our_handshake())).await {
+                        error!("Failed to send handshake: {}", e);
+                        self.close().await;
+                        return false;
+                    }
+                    debug!("Inbound handshake info_hash verified, replied with our handshake");
+                }
+                Some(Ok(WireItem::Handshake(handshake))) => {
+                    let addr = match framed.get_ref().peer_addr() {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            error!("Failed to get peer address: {}", e);
+                            self.close().await;
+                            return false;
+                        }
+                    };
+                    self.peer = Some(Peer {
+                        peer_id: Some(handshake.peer_id),
+                        ip: addr.ip().to_string(),
+                        port: addr.port(),
+                    });
+                    debug!("Inbound handshake complete with {}", addr);
+                    return true;
+                }
+                _ => {
+                    error!("Handshake failed: unexpected message or connection closed");
+                    self.close().await;
+                    return false;
+                }
             }
         }
     }

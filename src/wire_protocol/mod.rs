@@ -2,6 +2,7 @@ pub mod codec;
 
 pub use codec::WireCodec;
 
+#[derive(Debug)]
 pub struct Handshake {
     pub pstrlen: u8,
     pub pstr: String,
@@ -10,6 +11,7 @@ pub struct Handshake {
     pub peer_id: [u8; 20],
 }
 
+#[derive(Debug)]
 pub enum Message {
     Choke,
     Unchoke,
@@ -35,6 +37,7 @@ pub enum Message {
     Port(u16),
 }
 
+#[derive(Debug)]
 pub enum WireItem {
     /// Yields just the `info_hash` as soon as it is available.
     /// This allows the seeder to respond with its own handshake early.
