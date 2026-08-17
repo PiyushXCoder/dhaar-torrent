@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use tokio::task::JoinHandle;
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::error::Result;
 
@@ -36,6 +36,7 @@ impl PeerExplorer {
                 match message {
                     channel::PeerSourceChannelMessage::PeerFound(peer) => {
                         if dedup.insert(peer.clone()) {
+                            debug!("New unique peer discovered, {} total so far", dedup.len());
                             peer_explorer_channel_sender
                                 .send(channel::PeerExplorerChannelMessage::PeerFound(peer))
                                 .await

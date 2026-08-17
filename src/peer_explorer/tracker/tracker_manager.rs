@@ -99,8 +99,8 @@ async fn announce_tracker(
         };
         let min_interval = response.base.min_interval.unwrap_or(60);
         let peers = response.peers.unwrap_or(vec![]);
-        debug!(
-            "Tracker {} responded: {} peers, min_interval={}s",
+        info!(
+            "Tracker {} responded: {} peers discovered, min_interval={}s",
             next.announce_url,
             peers.len(),
             min_interval
