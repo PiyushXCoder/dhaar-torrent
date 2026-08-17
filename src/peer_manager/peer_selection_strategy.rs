@@ -4,7 +4,7 @@ use std::collections::BinaryHeap;
 use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
 
-const RETRY_DELAY: Duration = Duration::from_secs(5);
+const RETRY_DELAY: Duration = Duration::from_secs(23);
 
 /// A peer handed out by [`PeerSelectionStrategy::pop`], tagged with whether
 /// it's back after a failed attempt so the caller can tell it apart from a
