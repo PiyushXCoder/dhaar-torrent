@@ -1,7 +1,7 @@
 use serde_bytes::ByteBuf;
 use sha1::Digest;
 use tokio::task::JoinHandle;
-use tracing::error;
+use tracing::{error, info};
 
 pub mod channel;
 pub mod piece_writer;
@@ -81,6 +81,11 @@ where
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) -> JoinHandle<()> {
         self.piece_writer.initialize().await.unwrap();
+        info!(
+            "Piece manager started: {} pieces, {} bytes/piece",
+            self.total_pieces(),
+            self.piece_length
+        );
         tokio::spawn(async move {
             while let Some(msg) = piece_manager_channel_receiver.recv().await {
                 match msg {
@@ -259,9 +264,21 @@ where
         piece.blocks = None;
         piece.block_length = None;
 
-        if self.completed_pieces() == self.total_pieces() {
+        let completed = self.completed_pieces();
+        let total = self.total_pieces();
+        info!(
+            "Piece {} verified and complete ({}/{})",
+            piece_index, completed, total
+        );
+
+        if completed == total {
             if let Err(e) = self.piece_writer.finalize().await {
                 error!("Failed to finalize download: {}", e);
+            } else {
+                info!(
+                    "Download complete, all {} pieces verified and written to disk",
+                    total
+                );
             }
         }
 
