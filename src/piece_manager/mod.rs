@@ -1,6 +1,7 @@
 use serde_bytes::ByteBuf;
 use sha1::Digest;
 use tokio::task::JoinHandle;
+use tracing::error;
 
 pub mod channel;
 pub mod piece_writer;
@@ -144,7 +145,7 @@ where
                         response_sender,
                     } => {
                         response_sender
-                            .send(self.complete_piece(piece_index))
+                            .send(self.complete_piece(piece_index).await)
                             .unwrap();
                     }
                     PieceManagerMessage::UnlockPiece { piece_index } => {
@@ -250,13 +251,20 @@ where
         digest == piece.hash
     }
 
-    fn complete_piece(&mut self, piece_index: u64) -> bool {
+    async fn complete_piece(&mut self, piece_index: u64) -> bool {
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return false;
         };
         piece.complete = true;
         piece.blocks = None;
         piece.block_length = None;
+
+        if self.completed_pieces() == self.total_pieces() {
+            if let Err(e) = self.piece_writer.finalize().await {
+                error!("Failed to finalize download: {}", e);
+            }
+        }
+
         true
     }
 
