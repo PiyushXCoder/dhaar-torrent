@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::peer_explorer::PeerSource;
@@ -89,7 +89,7 @@ async fn announce_tracker(
             Err(e) => {
                 next.failure_count += 1;
                 next.next_instance = Instant::now() + Duration::from_secs(5);
-                error!(
+                warn!(
                     "Error announcing to tracker {}: {} (failure_count={})",
                     next.announce_url, e, next.failure_count
                 );

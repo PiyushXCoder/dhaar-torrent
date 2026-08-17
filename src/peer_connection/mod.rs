@@ -8,7 +8,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot};
 use tokio_util::codec::Framed;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct PeerConnection {
     pub peer: Option<Peer>,
@@ -228,7 +228,7 @@ impl PeerConnection {
                     );
                 }
                 Some(Err(e)) => {
-                    error!("Failed to receive message: {}", e);
+                    warn!("{}: failed to receive message: {}", self.peer_addr(), e);
                     self.close().await;
                     return None;
                 }
@@ -404,7 +404,7 @@ impl PeerConnection {
 
     async fn handshake_outbound(&mut self, framed: &mut Framed<TcpStream, WireCodec>) -> bool {
         if let Err(e) = framed.send(WireItem::Handshake(self.our_handshake())).await {
-            error!("Failed to send handshake: {}", e);
+            warn!("{}: failed to send handshake: {}", self.peer_addr(), e);
             self.close().await;
             return false;
         }
@@ -413,7 +413,7 @@ impl PeerConnection {
             match framed.next().await {
                 Some(Ok(WireItem::HandshakePartial { info_hash })) => {
                     if info_hash != self.info_hash {
-                        error!("Handshake failed: info_hash mismatch");
+                        warn!("{}: handshake failed, info_hash mismatch", self.peer_addr());
                         self.close().await;
                         return false;
                     }
@@ -429,7 +429,10 @@ impl PeerConnection {
                     return true;
                 }
                 _ => {
-                    error!("Handshake failed: unexpected message or connection closed");
+                    warn!(
+                        "{}: handshake failed, unexpected message or connection closed",
+                        self.peer_addr()
+                    );
                     self.close().await;
                     return false;
                 }
@@ -442,12 +445,12 @@ impl PeerConnection {
             match framed.next().await {
                 Some(Ok(WireItem::HandshakePartial { info_hash })) => {
                     if info_hash != self.info_hash {
-                        error!("Handshake failed: unknown info_hash");
+                        warn!("{}: handshake failed, unknown info_hash", self.peer_addr());
                         self.close().await;
                         return false;
                     }
                     if let Err(e) = framed.send(WireItem::Handshake(self.our_handshake())).await {
-                        error!("Failed to send handshake: {}", e);
+                        warn!("{}: failed to send handshake: {}", self.peer_addr(), e);
                         self.close().await;
                         return false;
                     }
@@ -457,7 +460,7 @@ impl PeerConnection {
                     let addr = match framed.get_ref().peer_addr() {
                         Ok(addr) => addr,
                         Err(e) => {
-                            error!("Failed to get peer address: {}", e);
+                            warn!("Failed to get peer address: {}", e);
                             self.close().await;
                             return false;
                         }
@@ -471,7 +474,10 @@ impl PeerConnection {
                     return true;
                 }
                 _ => {
-                    error!("Handshake failed: unexpected message or connection closed");
+                    warn!(
+                        "{}: handshake failed, unexpected message or connection closed",
+                        self.peer_addr()
+                    );
                     self.close().await;
                     return false;
                 }
