@@ -39,8 +39,11 @@ impl DiskPieceWriter {
         md5sum: &Option<String>,
         files: &Option<Vec<TorrentFile>>,
     ) -> Self {
+        let temp_file = std::env::current_dir()
+            .unwrap()
+            .join(format!("{name}.dhaar"));
         Self {
-            temp_file: PathBuf::new(),
+            temp_file,
             piece_length,
             name: name.clone(),
             length,
