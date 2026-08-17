@@ -6,7 +6,7 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-~25% complete. Bencode codec and torrent file parsing done. Tracker announce started, peer networking not started.
+~40% complete. Bencode codec, torrent file parsing, and tracker announce done. Peer wire protocol (handshake + choke/unchoke/interested/have/bitfield/request/piece) implemented with a basic single-block-at-a-time download loop; pipelining, timeouts, and DHT still missing.
 
 ### TODO
 
@@ -19,10 +19,15 @@ A torrent client written in Rust. Unserious. Built for fun.
 - [x] Logging/tracing — add `tracing` + `tracing-subscriber` with env-filter
 - [x] Tracker announce — HTTP GET request, URL rotation, retry with backoff
 - [x] Tracker response — support binary model peers (6-byte entries)
+- [x] Peer wire protocol — TCP handshake, choke/unchoke, interested, have, bitfield, request/piece messages
+- [x] Piece manager — piece indices, bitfield tracking, sequential block download/upload (no pipelining yet)
+- [ ] Connection timeouts (connect/handshake/read) and periodic keep-alive
+- [ ] Request pipelining (multiple outstanding block requests per peer)
+- [ ] Disk I/O — writing verified pieces to disk done; resume support (recovering already-downloaded pieces on restart) pending
+- [ ] `Download` wrapper struct — pull the wiring out of `main.rs` (currently cluttered)
+- [ ] Status/progress events — download internals report events back to `main` instead of being silent
+- [ ] CLI progress bar driven by those events
 - [ ] Tracker communication — UDP tracker (BEP 15)
-- [ ] Peer wire protocol — TCP handshake, choke/unchoke, interested, request messages
-- [ ] Piece manager — piece indices, bitfield tracking, download/upload queues
-- [ ] Disk I/O — writing verified pieces to disk, resume support
 - [ ] DHT (BEP 5) — decentralized peer discovery
 - [ ] Magnet links (BEP 9/10) — metadata exchange
 - [ ] Upload/seeding

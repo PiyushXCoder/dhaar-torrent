@@ -1,13 +1,14 @@
 use dhaar_torrent::{
-    TorrentEvent,
-    client::Client,
     config::get_configuration,
     helpers::generate_random_peer_id,
-    torrent::Torrent,
-    torrent_file::{TorrentFile, info_hash},
+    peer_explorer::{PeerExplorer, channel::new_peer_explorer_channel, tracker::TrackerManager},
+    peer_manager::{PeerManager, peer_selection_strategy::RetryAfterDelayPeerSelectionStrategy},
+    piece_manager::{
+        PieceManager, channel::new_piece_manager_channel, piece_writer::DiskPieceWriter,
+    },
+    torrent_parser::TorrentParser,
 };
-use std::fs;
-use tracing::{error, info};
+use tracing::error;
 
 #[tokio::main]
 async fn main() {
@@ -21,32 +22,46 @@ async fn main() {
         }
     };
 
-    let mut client = Client::new();
-
-    let torrent_file_data = fs::read(&config.torrent_file).unwrap();
-    let torrent_file = bencode::from_bytes::<TorrentFile>(&torrent_file_data).unwrap();
-    info!("torrent file: {:?}", torrent_file.announce);
-    let info_hash = info_hash(&torrent_file_data);
+    let torrent = dhaar_torrent::torrent_parser::TorrentFileParser::parse_from_file_path(
+        &config.torrent_file,
+    )
+    .unwrap();
     let peer_id = generate_random_peer_id();
-    let torrent = Torrent::new(torrent_file, info_hash, peer_id);
-    let mut handle = match client.add_torrent(torrent).await {
-        Ok(h) => h,
-        Err(e) => {
-            error!("{e:#}");
-            return;
-        }
-    };
 
-    while let Some(event) = handle.events.recv().await {
-        match event {
-            TorrentEvent::PeersFound(n) => println!("Peers found: {n}"),
-            TorrentEvent::TrackerWarning(msg) => eprintln!("Tracker warning: {msg}"),
-            TorrentEvent::TrackerFailure(msg) => eprintln!("Tracker failure: {msg}"),
-            TorrentEvent::TrackerError(msg) => eprintln!("Tracker error: {msg}"),
-            TorrentEvent::PeerConnected => println!("Peer connected"),
-            TorrentEvent::PeerDisconnected => println!("Peer disconnected"),
-            TorrentEvent::Downloaded(bytes) => println!("Downloaded: {bytes} bytes"),
-            TorrentEvent::PieceComplete(idx) => println!("Piece {idx} complete"),
-        }
-    }
+    let (peer_explorer_channel_sender, peer_explorer_channel_receiver) =
+        new_peer_explorer_channel();
+    let (piece_manager_channel_sender, piece_manager_channel_receiver) =
+        new_piece_manager_channel();
+
+    let tracker_manager = TrackerManager::new(vec![torrent.announce], &torrent.info_hash, &peer_id);
+    let mut peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
+    let join_handle1 = peer_explorer.start(peer_explorer_channel_sender).await;
+
+    let piece_writer = DiskPieceWriter::new(
+        torrent.info.piece_length,
+        &torrent.info.name,
+        torrent.info.length,
+        &torrent.info.md5sum,
+        &torrent.info.files,
+    );
+    let piece_manager = PieceManager::new(
+        &torrent.info.pieces,
+        torrent.info.piece_length,
+        piece_writer,
+    );
+    let join_handle2 = piece_manager.start(piece_manager_channel_receiver).await;
+
+    let retry_after_delay_peer_selection_strategy = RetryAfterDelayPeerSelectionStrategy::new();
+    let peer_manager = PeerManager::new(
+        retry_after_delay_peer_selection_strategy,
+        &torrent.info_hash,
+        &peer_id,
+    );
+    let join_handle3 = peer_manager
+        .start(peer_explorer_channel_receiver, piece_manager_channel_sender)
+        .await;
+
+    join_handle1.await.unwrap();
+    join_handle2.await.unwrap();
+    join_handle3.await.unwrap();
 }
