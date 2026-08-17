@@ -23,7 +23,7 @@ pub struct PeerConnection {
     pub peer_interested: bool,
 }
 
-const BLOCK_SIZE: u64 = 16384;
+const BLOCK_SIZE: u32 = 16384;
 
 impl PeerConnection {
     pub async fn connect(
@@ -94,7 +94,7 @@ impl PeerConnection {
             .unwrap();
 
         let mut peer_bitfield: Option<Bitfield> = None;
-        let mut current_piece: Option<u64> = None;
+        let mut current_piece: Option<u32> = None;
 
         loop {
             match framed.next().await {
@@ -161,7 +161,7 @@ impl PeerConnection {
                             index
                         );
                     } else {
-                        let block_index = begin as u64 / BLOCK_SIZE;
+                        let block_index = begin / BLOCK_SIZE;
                         debug!(
                             "{}: peer requested piece {} block {}",
                             self.peer_addr(),
@@ -170,7 +170,7 @@ impl PeerConnection {
                         );
                         let block = self
                             .piece_manager_request(|tx| PieceManagerMessage::ReadBlock {
-                                piece_index: index as u64,
+                                piece_index: index,
                                 block_index,
                                 response_sender: tx,
                             })
@@ -190,7 +190,7 @@ impl PeerConnection {
                     begin,
                     block,
                 }))) => {
-                    let block_index = begin as u64 / BLOCK_SIZE;
+                    let block_index = begin / BLOCK_SIZE;
                     debug!(
                         "{}: received piece {} block {} ({} bytes)",
                         self.peer_addr(),
@@ -199,7 +199,7 @@ impl PeerConnection {
                         block.len()
                     );
                     self.piece_manager_notify(PieceManagerMessage::ReceiveBlock {
-                        piece_index: index as u64,
+                        piece_index: index,
                         block_index,
                         block_data: block,
                     })
@@ -271,7 +271,7 @@ impl PeerConnection {
     async fn request_next_block(
         &mut self,
         framed: &mut Framed<TcpStream, WireCodec>,
-        current_piece: &mut Option<u64>,
+        current_piece: &mut Option<u32>,
         peer_bitfield: Option<&Bitfield>,
     ) -> Option<()> {
         if !self.am_interested || self.peer_choking {
@@ -331,7 +331,7 @@ impl PeerConnection {
                 continue;
             };
 
-            let begin = block_index as u32 * BLOCK_SIZE as u32;
+            let begin = block_index * BLOCK_SIZE;
             debug!(
                 "{}: requesting piece {} block {}",
                 self.peer_addr(),
@@ -340,9 +340,9 @@ impl PeerConnection {
             );
             framed
                 .send(WireItem::Message(Message::Request {
-                    index: piece_index as u32,
+                    index: piece_index,
                     begin,
-                    length: BLOCK_SIZE as u32,
+                    length: BLOCK_SIZE,
                 }))
                 .await
                 .unwrap();

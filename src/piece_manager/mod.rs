@@ -162,7 +162,7 @@ where
         })
     }
 
-    fn has_piece(&self, piece_index: u64) -> bool {
+    fn has_piece(&self, piece_index: u32) -> bool {
         match self.pieces.get(piece_index as usize) {
             Some(piece) => piece.complete,
             None => true,
@@ -186,17 +186,17 @@ where
             .any(|(index, piece)| !piece.complete && bitfield.has_piece(index as u32))
     }
 
-    fn lock_next_piece(&mut self, bitfield: &Bitfield) -> Option<u64> {
+    fn lock_next_piece(&mut self, bitfield: &Bitfield) -> Option<u32> {
         let piece_length = self.piece_length;
         let (index, piece) = self.pieces.iter_mut().enumerate().find(|(index, piece)| {
             !piece.complete && !piece.locked && bitfield.has_piece(*index as u32)
         })?;
         piece.locked = true;
         piece.ensure_initialized(piece_length);
-        Some(index as u64)
+        Some(index as u32)
     }
 
-    fn lock_next_block(&mut self, piece_index: u64) -> Option<u64> {
+    fn lock_next_block(&mut self, piece_index: u32) -> Option<u32> {
         let piece_length = self.piece_length;
         let piece = self.pieces.get_mut(piece_index as usize)?;
         piece.ensure_initialized(piece_length);
@@ -206,19 +206,19 @@ where
             .enumerate()
             .find(|(_, block)| !block.locked && !block.complete)?;
         block.locked = true;
-        Some(index as u64)
+        Some(index as u32)
     }
 
-    async fn receive_block(&mut self, piece_index: u64, block_index: u64, block_data: Vec<u8>) {
+    async fn receive_block(&mut self, piece_index: u32, block_index: u32, block_data: Vec<u8>) {
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
         };
         let Some(block_length) = piece.block_length else {
             return;
         };
-        let offset = block_index as usize * block_length as usize;
+        let offset = block_index as u64 * block_length;
         self.piece_writer
-            .write(piece_index, offset as u64, block_data)
+            .write(piece_index, offset, block_data)
             .await
             .unwrap();
         if let Some(blocks) = piece.blocks.as_mut() {
@@ -228,11 +228,11 @@ where
         }
     }
 
-    async fn read_block(&self, piece_index: u64, block_index: u64) -> Vec<u8> {
+    async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
         let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
             return Vec::new();
         };
-        let offset = (block_index * BLOCK_SIZE) as usize;
+        let offset = (block_index as u64 * BLOCK_SIZE) as usize;
         if offset >= data.len() {
             return Vec::new();
         }
@@ -240,7 +240,7 @@ where
         data[offset..end].to_vec()
     }
 
-    async fn verify_piece(&self, piece_index: u64) -> bool {
+    async fn verify_piece(&self, piece_index: u32) -> bool {
         let Some(piece) = self.pieces.get(piece_index as usize) else {
             return false;
         };
@@ -251,7 +251,7 @@ where
         digest == piece.hash
     }
 
-    async fn complete_piece(&mut self, piece_index: u64) -> bool {
+    async fn complete_piece(&mut self, piece_index: u32) -> bool {
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return false;
         };
@@ -268,7 +268,7 @@ where
         true
     }
 
-    fn unlock_piece(&mut self, piece_index: u64) {
+    fn unlock_piece(&mut self, piece_index: u32) {
         if let Some(piece) = self.pieces.get_mut(piece_index as usize) {
             piece.locked = false;
             if let Some(blocks) = piece.blocks.as_mut() {
@@ -279,11 +279,11 @@ where
         }
     }
 
-    fn completed_pieces(&self) -> u64 {
-        self.pieces.iter().filter(|piece| piece.complete).count() as u64
+    fn completed_pieces(&self) -> u32 {
+        self.pieces.iter().filter(|piece| piece.complete).count() as u32
     }
 
-    fn total_pieces(&self) -> u64 {
-        self.pieces.len() as u64
+    fn total_pieces(&self) -> u32 {
+        self.pieces.len() as u32
     }
 }

@@ -9,7 +9,7 @@ const CHANNEL_SIZE: usize = 256;
 
 pub enum PieceManagerMessage {
     HasPiece {
-        piece_index: u64,
+        piece_index: u32,
         response_sender: OneShotSender<bool>,
     },
     Bitfield {
@@ -21,39 +21,39 @@ pub enum PieceManagerMessage {
     },
     LockNextPiece {
         bitfield: Bitfield,
-        response_sender: OneShotSender<Option<u64>>,
+        response_sender: OneShotSender<Option<u32>>,
     },
 
     LockNextBlock {
-        piece_index: u64,
-        response_sender: OneShotSender<Option<u64>>,
+        piece_index: u32,
+        response_sender: OneShotSender<Option<u32>>,
     },
     ReceiveBlock {
-        piece_index: u64,
-        block_index: u64,
+        piece_index: u32,
+        block_index: u32,
         block_data: Vec<u8>,
     },
     ReadBlock {
-        piece_index: u64,
-        block_index: u64,
+        piece_index: u32,
+        block_index: u32,
         response_sender: OneShotSender<Vec<u8>>,
     },
     VerifyPiece {
-        piece_index: u64,
+        piece_index: u32,
         response_sender: OneShotSender<bool>,
     },
     CompletePiece {
-        piece_index: u64,
+        piece_index: u32,
         response_sender: OneShotSender<bool>,
     },
     UnlockPiece {
-        piece_index: u64,
+        piece_index: u32,
     },
     CompletedPiece {
-        response_sender: OneShotSender<u64>,
+        response_sender: OneShotSender<u32>,
     },
     TotalPieces {
-        response_sender: OneShotSender<u64>,
+        response_sender: OneShotSender<u32>,
     },
 }
 

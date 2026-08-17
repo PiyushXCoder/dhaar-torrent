@@ -12,10 +12,10 @@ pub trait PieceWriter {
     type Error;
 
     async fn initialize(&self) -> Result<(), Self::Error>;
-    async fn read(&self, piece_index: u64, piece_offset: u64) -> Result<Vec<u8>, Self::Error>;
+    async fn read(&self, piece_index: u32, piece_offset: u64) -> Result<Vec<u8>, Self::Error>;
     async fn write(
         &self,
-        piece_index: u64,
+        piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error>;
@@ -63,10 +63,10 @@ impl PieceWriter for DiskPieceWriter {
         }
         Ok(())
     }
-    async fn read(&self, piece_index: u64, piece_offset: u64) -> Result<Vec<u8>, Self::Error> {
+    async fn read(&self, piece_index: u32, piece_offset: u64) -> Result<Vec<u8>, Self::Error> {
         let mut file = File::open(&self.temp_file).await?;
         file.seek(SeekFrom::Start(
-            self.piece_length * piece_index + piece_offset,
+            self.piece_length * piece_index as u64 + piece_offset,
         ))
         .await?;
         let mut buf = vec![0; self.piece_length as usize];
@@ -75,13 +75,13 @@ impl PieceWriter for DiskPieceWriter {
     }
     async fn write(
         &self,
-        piece_index: u64,
+        piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error> {
         let mut file = OpenOptions::new().write(true).open(&self.temp_file).await?;
         file.seek(SeekFrom::Start(
-            self.piece_length * piece_index + piece_offset,
+            self.piece_length * piece_index as u64 + piece_offset,
         ))
         .await?;
         file.write_all(&data).await?;
