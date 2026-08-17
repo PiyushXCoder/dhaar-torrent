@@ -1,5 +1,6 @@
 use serde_bytes::ByteBuf;
 use sha1::Digest;
+use tokio::task::JoinHandle;
 
 pub mod channel;
 pub mod piece_writer;
@@ -77,7 +78,7 @@ where
     pub async fn start(
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
-    ) {
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(msg) = piece_manager_channel_receiver.recv().await {
                 match msg {
@@ -150,7 +151,7 @@ where
                     }
                 }
             }
-        });
+        })
     }
 
     fn has_piece(&self, piece_index: u64) -> bool {

@@ -88,6 +88,7 @@ async fn announce_tracker(
             Ok(response) => response,
             Err(e) => {
                 next.failure_count += 1;
+                next.next_instance = Instant::now() + Duration::from_secs(5);
                 error!(
                     "Error announcing to tracker {}: {} (failure_count={})",
                     next.announce_url, e, next.failure_count

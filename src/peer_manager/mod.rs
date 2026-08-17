@@ -4,6 +4,7 @@ use crate::{
     piece_manager::channel::PieceManagerChannelSender,
 };
 use channels::PeerManagerChannelMessage;
+use tokio::task::JoinHandle;
 
 pub mod channels;
 pub mod peer_selection_strategy;
@@ -35,7 +36,7 @@ where
         mut self,
         mut peer_explorer_channel_receiver: PeerExplorerChannelReceiver,
         piece_manager_channel_sender: PieceManagerChannelSender,
-    ) {
+    ) -> JoinHandle<()> {
         let (peer_manager_channel_sender, mut peer_manager_channel_receiver) =
             channels::new_peer_manager_channel();
 
@@ -77,6 +78,6 @@ where
                     }
                 }
             }
-        });
+        })
     }
 }

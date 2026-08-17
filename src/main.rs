@@ -35,7 +35,7 @@ async fn main() {
 
     let tracker_manager = TrackerManager::new(vec![torrent.announce], &torrent.info_hash, &peer_id);
     let mut peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
-    peer_explorer.start(peer_explorer_channel_sender).await;
+    let join_handle1 = peer_explorer.start(peer_explorer_channel_sender).await;
 
     let piece_writer = DiskPieceWriter::new(
         torrent.info.piece_length,
@@ -49,7 +49,7 @@ async fn main() {
         torrent.info.piece_length,
         piece_writer,
     );
-    piece_manager.start(piece_manager_channel_receiver).await;
+    let join_handle2 = piece_manager.start(piece_manager_channel_receiver).await;
 
     let retry_after_delay_peer_selection_strategy = RetryAfterDelayPeerSelectionStrategy::new();
     let peer_manager = PeerManager::new(
@@ -57,7 +57,11 @@ async fn main() {
         &torrent.info_hash,
         &peer_id,
     );
-    peer_manager
+    let join_handle3 = peer_manager
         .start(peer_explorer_channel_receiver, piece_manager_channel_sender)
         .await;
+
+    join_handle1.await.unwrap();
+    join_handle2.await.unwrap();
+    join_handle3.await.unwrap();
 }

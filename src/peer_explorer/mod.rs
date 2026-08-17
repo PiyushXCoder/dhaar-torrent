@@ -20,7 +20,7 @@ impl PeerExplorer {
     pub async fn start(
         &mut self,
         peer_explorer_channel_sender: channel::PeerExplorerChannelSender,
-    ) {
+    ) -> JoinHandle<()> {
         let (peer_source_channel_sender, mut peer_source_channel_receiver) =
             channel::new_peer_source_channel();
 
@@ -44,7 +44,7 @@ impl PeerExplorer {
                     }
                 }
             }
-        });
+        })
     }
 }
 
