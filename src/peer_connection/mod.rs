@@ -26,18 +26,25 @@ pub struct PeerConnection {
 const BLOCK_SIZE: u32 = 16384;
 
 impl PeerConnection {
+    /// Connects to `peer`. On failure the peer is handed back so the caller
+    /// can requeue it, instead of panicking the whole peer manager loop over
+    /// a single dead/unreachable peer.
     pub async fn connect(
         peer: Peer,
         peer_manager_channel_sender: PeerManagerChannelSender,
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
-    ) -> Self {
-        let stream = TcpStream::connect(format!("{}:{}", peer.ip, peer.port))
-            .await
-            .unwrap();
+    ) -> Result<Self, Peer> {
+        let stream = match TcpStream::connect(format!("{}:{}", peer.ip, peer.port)).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                warn!("Failed to connect to peer {}:{}: {}", peer.ip, peer.port, e);
+                return Err(peer);
+            }
+        };
 
-        PeerConnection {
+        Ok(PeerConnection {
             peer: Some(peer),
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
@@ -48,7 +55,7 @@ impl PeerConnection {
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
-        }
+        })
     }
 
     pub async fn from_stream(

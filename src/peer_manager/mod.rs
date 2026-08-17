@@ -66,15 +66,30 @@ where
                     {
                         active += 1;
 
-                        let peer_connection = PeerConnection::connect(
-                            attempt.peer,
-                            peer_manager_channel_sender.clone(),
-                            piece_manager_channel_sender.clone(),
-                            &self.info_hash,
-                            &self.peer_id,
-                        )
-                        .await;
-                        tokio::spawn(peer_connection.start());
+                        let peer_manager_channel_sender = peer_manager_channel_sender.clone();
+                        let piece_manager_channel_sender = piece_manager_channel_sender.clone();
+                        let info_hash = self.info_hash;
+                        let peer_id = self.peer_id;
+
+                        tokio::spawn(async move {
+                            let connection_sender = peer_manager_channel_sender.clone();
+                            match PeerConnection::connect(
+                                attempt.peer,
+                                connection_sender,
+                                piece_manager_channel_sender,
+                                &info_hash,
+                                &peer_id,
+                            )
+                            .await
+                            {
+                                Ok(peer_connection) => peer_connection.start().await,
+                                Err(peer) => {
+                                    let _ = peer_manager_channel_sender
+                                        .send(PeerManagerChannelMessage::Closing(peer))
+                                        .await;
+                                }
+                            }
+                        });
                     }
                 }
             }
