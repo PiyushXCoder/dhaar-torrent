@@ -43,7 +43,7 @@ impl PeerSource for TrackerManager {
             .iter()
             .map(|announce_url| Tracker {
                 // TODO: support other trackers
-                tracker_client: Arc::new(TcpTrackerClient::new(&announce_url)),
+                tracker_client: Arc::new(TcpTrackerClient::new(announce_url)),
                 announce_url: announce_url.clone(),
                 next_instance: Instant::now(),
                 failure_count: 0,

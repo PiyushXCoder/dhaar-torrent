@@ -226,10 +226,10 @@ where
             .write(piece_index, offset, block_data)
             .await
             .unwrap();
-        if let Some(blocks) = piece.blocks.as_mut() {
-            if let Some(block) = blocks.get_mut(block_index as usize) {
-                block.complete = true;
-            }
+        if let Some(blocks) = piece.blocks.as_mut()
+            && let Some(block) = blocks.get_mut(block_index as usize)
+        {
+            block.complete = true;
         }
     }
 

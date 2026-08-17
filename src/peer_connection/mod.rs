@@ -40,7 +40,7 @@ impl PeerConnection {
         PeerConnection {
             peer: Some(peer),
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
-            piece_manager_channel_sender: piece_manager_channel_sender,
+            piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
@@ -61,7 +61,7 @@ impl PeerConnection {
         PeerConnection {
             peer: None,
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
-            piece_manager_channel_sender: piece_manager_channel_sender,
+            piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
@@ -251,13 +251,11 @@ impl PeerConnection {
             .peer
             .take()
             .zip(self.peer_manager_channel_sender.take())
-        {
-            if let Err(e) = peer_manager_channel_sender
+            && let Err(e) = peer_manager_channel_sender
                 .send(PeerManagerChannelMessage::Closing(peer))
                 .await
-            {
-                error!("Failed to close peer connection: {}", e);
-            }
+        {
+            error!("Failed to close peer connection: {}", e);
         }
     }
 

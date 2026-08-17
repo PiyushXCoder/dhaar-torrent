@@ -26,7 +26,7 @@ impl Decoder for WireCodec {
                     let len = if let Some(pstrlen) = pstrlen {
                         *pstrlen
                     } else {
-                        *pstrlen = Some(buf[offset] as u8);
+                        *pstrlen = Some(buf[offset]);
                         buf[offset]
                     };
 
@@ -83,14 +83,14 @@ impl Decoder for WireCodec {
                     Handshake {
                         pstrlen: len,
                         pstr: pstr.to_string(),
-                        info_hash: info_hash,
-                        reserved: reserved,
-                        peer_id: peer_id,
+                        info_hash,
+                        reserved,
+                        peer_id,
                     }
                 };
                 src.advance(offset);
                 self.state = CodecState::Normal;
-                return Ok(Some(WireItem::Handshake(handshake)));
+                Ok(Some(WireItem::Handshake(handshake)))
             }
             CodecState::Normal => {
                 // Parse length‑prefixed messages (4‑byte length + payload).

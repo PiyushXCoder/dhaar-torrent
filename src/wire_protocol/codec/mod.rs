@@ -28,3 +28,9 @@ impl WireCodec {
         }
     }
 }
+
+impl Default for WireCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
