@@ -15,6 +15,10 @@ pub enum PieceManagerMessage {
     Bitfield {
         response_sender: OneShotSender<Bitfield>,
     },
+    AmInterested {
+        bitfield: Bitfield,
+        response_sender: OneShotSender<bool>,
+    },
     LockNextPiece {
         bitfield: Bitfield,
         response_sender: OneShotSender<Option<u64>>,

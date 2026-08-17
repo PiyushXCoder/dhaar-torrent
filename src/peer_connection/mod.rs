@@ -1,19 +1,19 @@
 use crate::{
     peer_explorer::Peer,
     peer_manager::channels::{PeerManagerChannelMessage, PeerManagerChannelSender},
-    piece_manager::channel::PieceManagerChannelSender,
-    wire_protocol::{Handshake, WireCodec, WireItem},
+    piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
+    wire_protocol::{Bitfield, Handshake, Message, WireCodec, WireItem},
 };
 
 use futures::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::oneshot};
 use tokio_util::codec::Framed;
 use tracing::{debug, error};
 
 pub struct PeerConnection {
     pub peer: Option<Peer>,
     pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
-    pub piece_manager_channel_sender: Option<PieceManagerChannelSender>,
+    pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub stream: Option<TcpStream>,
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
@@ -22,6 +22,8 @@ pub struct PeerConnection {
     pub peer_choking: bool,
     pub peer_interested: bool,
 }
+
+const BLOCK_SIZE: u64 = 16384;
 
 impl PeerConnection {
     pub async fn connect(
@@ -38,7 +40,7 @@ impl PeerConnection {
         PeerConnection {
             peer: Some(peer),
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
-            piece_manager_channel_sender: Some(piece_manager_channel_sender),
+            piece_manager_channel_sender: piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
@@ -59,7 +61,7 @@ impl PeerConnection {
         PeerConnection {
             peer: None,
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
-            piece_manager_channel_sender: Some(piece_manager_channel_sender),
+            piece_manager_channel_sender: piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
@@ -70,19 +72,176 @@ impl PeerConnection {
         }
     }
     pub async fn start(mut self) {
-        let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
-        self.handshake(&mut framed).await;
-
         tokio::spawn(async move {
-            // loop {
-            //     todo!()
-            // }
-            #[allow(unreachable_code)]
-            self.close().await;
+            self.run().await;
         });
     }
 
+    async fn run(&mut self) -> Option<()> {
+        let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
+        if !self.handshake(&mut framed).await {
+            return None;
+        }
+
+        let our_bitfield = self
+            .piece_manager_request(|tx| PieceManagerMessage::Bitfield {
+                response_sender: tx,
+            })
+            .await?;
+        framed
+            .send(WireItem::Message(Message::Bitfield(our_bitfield)))
+            .await
+            .unwrap();
+
+        let mut peer_bitfield: Option<Bitfield> = None;
+        let mut current_piece: Option<u64> = None;
+
+        loop {
+            match framed.next().await {
+                Some(Ok(WireItem::Message(Message::Choke))) => {
+                    debug!("{}: peer choked us", self.peer_addr());
+                    self.peer_choking = true;
+                }
+                Some(Ok(WireItem::Message(Message::Unchoke))) => {
+                    debug!("{}: peer unchoked us", self.peer_addr());
+                    self.peer_choking = false;
+                    self.request_next_block(
+                        &mut framed,
+                        &mut current_piece,
+                        peer_bitfield.as_ref(),
+                    )
+                    .await?;
+                }
+                Some(Ok(WireItem::Message(Message::Interested))) => {
+                    debug!("{}: peer is interested", self.peer_addr());
+                    self.peer_interested = true;
+                }
+                Some(Ok(WireItem::Message(Message::NotInterested))) => {
+                    debug!("{}: peer is not interested", self.peer_addr());
+                    self.peer_interested = false;
+                }
+                Some(Ok(WireItem::Message(Message::Have(piece_index)))) => {
+                    debug!("{}: peer has piece {}", self.peer_addr(), piece_index);
+                    if let Some(peer_bitfield) = peer_bitfield.as_mut() {
+                        peer_bitfield.set_piece(piece_index, true);
+                    }
+                }
+                Some(Ok(WireItem::Message(Message::Bitfield(bitfield)))) => {
+                    peer_bitfield = Some(bitfield);
+                    let am_interested = self
+                        .piece_manager_request(|tx| PieceManagerMessage::AmInterested {
+                            bitfield: peer_bitfield.as_ref().unwrap().to_owned(),
+                            response_sender: tx,
+                        })
+                        .await?;
+                    self.am_interested = am_interested;
+                    debug!(
+                        "{}: received peer bitfield, am_interested={}",
+                        self.peer_addr(),
+                        am_interested
+                    );
+                    framed
+                        .send(WireItem::Message(if am_interested {
+                            Message::Interested
+                        } else {
+                            Message::NotInterested
+                        }))
+                        .await
+                        .unwrap();
+                }
+                Some(Ok(WireItem::Message(Message::Request {
+                    index,
+                    begin,
+                    length: _length,
+                }))) => {
+                    if self.am_choking {
+                        debug!(
+                            "{}: ignoring request for piece {} (choking peer)",
+                            self.peer_addr(),
+                            index
+                        );
+                    } else {
+                        let block_index = begin as u64 / BLOCK_SIZE;
+                        debug!(
+                            "{}: peer requested piece {} block {}",
+                            self.peer_addr(),
+                            index,
+                            block_index
+                        );
+                        let block = self
+                            .piece_manager_request(|tx| PieceManagerMessage::ReadBlock {
+                                piece_index: index as u64,
+                                block_index,
+                                response_sender: tx,
+                            })
+                            .await?;
+                        framed
+                            .send(WireItem::Message(Message::Piece {
+                                index,
+                                begin,
+                                block,
+                            }))
+                            .await
+                            .unwrap();
+                    }
+                }
+                Some(Ok(WireItem::Message(Message::Piece {
+                    index,
+                    begin,
+                    block,
+                }))) => {
+                    let block_index = begin as u64 / BLOCK_SIZE;
+                    debug!(
+                        "{}: received piece {} block {} ({} bytes)",
+                        self.peer_addr(),
+                        index,
+                        block_index,
+                        block.len()
+                    );
+                    self.piece_manager_notify(PieceManagerMessage::ReceiveBlock {
+                        piece_index: index as u64,
+                        block_index,
+                        block_data: block,
+                    })
+                    .await?;
+                    self.request_next_block(
+                        &mut framed,
+                        &mut current_piece,
+                        peer_bitfield.as_ref(),
+                    )
+                    .await?;
+                }
+                Some(Ok(WireItem::Message(Message::Cancel {
+                    index: _index,
+                    begin: _begin,
+                    length: _length,
+                }))) => {
+                    debug!(
+                        "{}: ignoring cancel, requests are served synchronously, nothing queued to cancel",
+                        self.peer_addr()
+                    );
+                }
+                Some(Ok(WireItem::Message(Message::Port(_port)))) => {
+                    debug!(
+                        "{}: ignoring port message, DHT not implemented",
+                        self.peer_addr()
+                    );
+                }
+                Some(Err(e)) => {
+                    error!("Failed to receive message: {}", e);
+                    self.close().await;
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        #[allow(unreachable_code)]
+        self.close().await;
+        Some(())
+    }
+
     pub async fn close(&mut self) {
+        debug!("{}: closing connection", self.peer_addr());
         if let Some((peer, peer_manager_channel_sender)) = self
             .peer
             .take()
@@ -93,6 +252,129 @@ impl PeerConnection {
                 .await
             {
                 error!("Failed to close peer connection: {}", e);
+            }
+        }
+    }
+
+    fn peer_addr(&self) -> String {
+        match self.peer.as_ref() {
+            Some(peer) => format!("{}:{}", peer.ip, peer.port),
+            None => "unknown".to_string(),
+        }
+    }
+
+    /// Requests the next available block, one at a time (no pipelining).
+    /// Locks a piece from `peer_bitfield` if we're not already working on
+    /// one, then locks and requests its next block; once a piece runs out
+    /// of unlocked blocks it's verified, completed, and unlocked before
+    /// moving on to the next.
+    async fn request_next_block(
+        &mut self,
+        framed: &mut Framed<TcpStream, WireCodec>,
+        current_piece: &mut Option<u64>,
+        peer_bitfield: Option<&Bitfield>,
+    ) -> Option<()> {
+        if !self.am_interested || self.peer_choking {
+            return Some(());
+        }
+
+        loop {
+            let piece_index = match *current_piece {
+                Some(piece_index) => piece_index,
+                None => {
+                    let Some(bitfield) = peer_bitfield else {
+                        return Some(());
+                    };
+                    let Some(piece_index) = self
+                        .piece_manager_request(|tx| PieceManagerMessage::LockNextPiece {
+                            bitfield: bitfield.to_owned(),
+                            response_sender: tx,
+                        })
+                        .await?
+                    else {
+                        return Some(());
+                    };
+                    *current_piece = Some(piece_index);
+                    piece_index
+                }
+            };
+
+            let Some(block_index) = self
+                .piece_manager_request(|tx| PieceManagerMessage::LockNextBlock {
+                    piece_index,
+                    response_sender: tx,
+                })
+                .await?
+            else {
+                let verified = self
+                    .piece_manager_request(|tx| PieceManagerMessage::VerifyPiece {
+                        piece_index,
+                        response_sender: tx,
+                    })
+                    .await?;
+                if verified {
+                    self.piece_manager_request(|tx| PieceManagerMessage::CompletePiece {
+                        piece_index,
+                        response_sender: tx,
+                    })
+                    .await?;
+                }
+                debug!(
+                    "{}: piece {} complete, verified={}",
+                    self.peer_addr(),
+                    piece_index,
+                    verified
+                );
+                self.piece_manager_notify(PieceManagerMessage::UnlockPiece { piece_index })
+                    .await?;
+                *current_piece = None;
+                continue;
+            };
+
+            let begin = block_index as u32 * BLOCK_SIZE as u32;
+            debug!(
+                "{}: requesting piece {} block {}",
+                self.peer_addr(),
+                piece_index,
+                block_index
+            );
+            framed
+                .send(WireItem::Message(Message::Request {
+                    index: piece_index as u32,
+                    begin,
+                    length: BLOCK_SIZE as u32,
+                }))
+                .await
+                .unwrap();
+            return Some(());
+        }
+    }
+
+    async fn piece_manager_notify(&mut self, message: PieceManagerMessage) -> Option<()> {
+        if let Err(e) = self.piece_manager_channel_sender.send(message).await {
+            error!("Failed to send message to piece manager: {}", e);
+            self.close().await;
+            return None;
+        }
+        Some(())
+    }
+
+    async fn piece_manager_request<T>(
+        &mut self,
+        build: impl FnOnce(oneshot::Sender<T>) -> PieceManagerMessage,
+    ) -> Option<T> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.piece_manager_channel_sender.send(build(tx)).await {
+            error!("Failed to send request to piece manager: {}", e);
+            self.close().await;
+            return None;
+        }
+        match rx.await {
+            Ok(value) => Some(value),
+            Err(e) => {
+                error!("Piece manager dropped response channel: {}", e);
+                self.close().await;
+                None
             }
         }
     }

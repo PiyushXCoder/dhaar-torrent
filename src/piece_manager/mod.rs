@@ -79,6 +79,7 @@ where
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) -> JoinHandle<()> {
+        self.piece_writer.initialize().await.unwrap();
         tokio::spawn(async move {
             while let Some(msg) = piece_manager_channel_receiver.recv().await {
                 match msg {
@@ -90,6 +91,12 @@ where
                     }
                     PieceManagerMessage::Bitfield { response_sender } => {
                         response_sender.send(self.bitfield()).unwrap();
+                    }
+                    PieceManagerMessage::AmInterested {
+                        bitfield,
+                        response_sender,
+                    } => {
+                        response_sender.send(self.am_interested(&bitfield)).unwrap();
                     }
                     PieceManagerMessage::LockNextPiece {
                         bitfield,
@@ -171,10 +178,17 @@ where
         Bitfield(bytes)
     }
 
+    fn am_interested(&self, bitfield: &Bitfield) -> bool {
+        self.pieces
+            .iter()
+            .enumerate()
+            .any(|(index, piece)| !piece.complete && bitfield.has_piece(index as u32))
+    }
+
     fn lock_next_piece(&mut self, bitfield: &Bitfield) -> Option<u64> {
         let piece_length = self.piece_length;
         let (index, piece) = self.pieces.iter_mut().enumerate().find(|(index, piece)| {
-            !piece.complete && !piece.locked && bitfield.has_piece(*index)
+            !piece.complete && !piece.locked && bitfield.has_piece(*index as u32)
         })?;
         piece.locked = true;
         piece.ensure_initialized(piece_length);
