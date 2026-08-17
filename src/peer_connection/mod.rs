@@ -232,6 +232,11 @@ impl PeerConnection {
                     self.close().await;
                     return None;
                 }
+                None => {
+                    debug!("{}: connection closed by peer", self.peer_addr());
+                    self.close().await;
+                    return None;
+                }
                 _ => {}
             }
         }
