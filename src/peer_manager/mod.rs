@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 pub mod channels;
 pub mod peer_selection_strategy;
 
-const MAX_PEERS: usize = 10;
+const MAX_PEERS: usize = 50;
 
 pub struct PeerManager<S>
 where
