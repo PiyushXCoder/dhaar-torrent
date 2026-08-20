@@ -1,4 +1,7 @@
+use std::pin::Pin;
+
 use super::channels::{IncomingChannelReceiver, OutgoingChannelSender};
+use super::{close, peer_addr, piece_manager_request};
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
@@ -7,6 +10,7 @@ use crate::{
     wire_protocol::{Bitfield, Handshake, Message, WireCodec, WireItem},
 };
 
+use tokio::{net::TcpStream, select, sync::oneshot, task::JoinSet, time};
 use tracing::{debug, error, warn};
 
 pub struct RequestManager {
@@ -57,36 +61,65 @@ impl RequestManager {
         tokio::spawn(async move {
             match self.run().await {
                 Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                    debug!("{}: connection ended", self.peer_addr());
+                    debug!("{}: connection ended", peer_addr(&self.peer));
                 }
-                Err(e) => warn!("{}: connection ended: {}", self.peer_addr(), e),
+                Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
             }
-            self.close().await;
+            close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
         });
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
-        Ok(())
-    }
+        let mut timeout: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
-    pub async fn close(&mut self) {
-        debug!("{}: closing connection", self.peer_addr());
-        if let Some((peer, peer_manager_channel_sender)) = self
-            .peer
-            .take()
-            .zip(self.peer_manager_channel_sender.take())
-            && let Err(e) = peer_manager_channel_sender
-                .send(PeerManagerChannelMessage::Closing(peer))
-                .await
-        {
-            error!("Failed to close peer connection: {}", e);
+        loop {
+            select! {
+                _ = async {
+                    match &mut timeout {
+                        Some(timeout) => timeout.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    return Err(PeerConnectionError::PeerDisconnected);
+                },
+                item = self.incoming_channel_receiver.recv() => {
+                    let Some(item) = item else {
+                        return Err(PeerConnectionError::PeerDisconnected);
+                    };
+                    timeout = self.handle_incoming_message(item).await?;
+                },
+            }
         }
     }
 
-    fn peer_addr(&self) -> String {
-        match self.peer.as_ref() {
-            Some(peer) => format!("{}:{}", peer.ip, peer.port),
-            None => "unknown".to_string(),
+    async fn handle_incoming_message(
+        &mut self,
+        item: WireItem,
+    ) -> PeerConnectionResult<Option<Pin<Box<tokio::time::Sleep>>>> {
+        match item {
+            WireItem::Message(Message::Choke) => {}
+            WireItem::Message(Message::Unchoke) => {}
+            WireItem::Message(Message::Interested) => {}
+            WireItem::Message(Message::NotInterested) => {}
+            WireItem::Message(Message::Have(_index)) => {}
+            WireItem::Message(Message::Request {
+                index: _,
+                begin: _,
+                length: _,
+            }) => {}
+            WireItem::Message(Message::Piece {
+                index: _,
+                begin: _,
+                block: _,
+            }) => {}
+            WireItem::Message(Message::Cancel {
+                index: _,
+                begin: _,
+                length: _,
+            }) => {}
+            WireItem::Message(Message::Port(_port)) => {}
+            _ => {}
         }
+        Ok(None)
     }
 }

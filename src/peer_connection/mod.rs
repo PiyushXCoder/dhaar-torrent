@@ -75,22 +75,23 @@ impl PeerConnection {
         tokio::spawn(async move {
             match self.run().await {
                 Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                    debug!("{}: connection ended", self.peer_addr());
+                    debug!("{}: connection ended", peer_addr(&self.peer));
                 }
-                Err(e) => warn!("{}: connection ended: {}", self.peer_addr(), e),
+                Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
             }
-            self.close().await;
+            close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
         });
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
         let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
         self.handshake(&mut framed).await?;
-        let our_bitfield = self
-            .piece_manager_request(|tx| PieceManagerMessage::Bitfield {
+        let our_bitfield = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
+            PieceManagerMessage::Bitfield {
                 response_sender: tx,
-            })
-            .await?;
+            }
+        })
+        .await?;
 
         framed
             .send(WireItem::Message(Message::Bitfield(our_bitfield)))
@@ -112,13 +113,29 @@ impl PeerConnection {
 
         joinset.spawn(async move {
             while let Some(item) = outgoing_receiver.recv().await {
-                sink.send(item).await.unwrap();
+                if let Err(e) = sink.send(item).await {
+                    warn!("wire write failed: {e}");
+                    break;
+                }
             }
         });
 
         joinset.spawn(async move {
-            while let Some(Ok(item)) = stream.next().await {
-                incoming_sender.send(item).await.unwrap();
+            loop {
+                match stream.next().await {
+                    Some(Ok(item)) => {
+                        // Receiver gone means the request manager already quit,
+                        // so there is nobody left to read what we decode.
+                        if incoming_sender.send(item).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!("wire decode failed: {e}");
+                        break;
+                    }
+                    None => break,
+                }
             }
         });
 
@@ -137,37 +154,9 @@ impl PeerConnection {
             request_manager.start().await;
         });
 
+        joinset.join_all().await;
+
         Ok(())
-    }
-
-    pub async fn close(&mut self) {
-        debug!("{}: closing connection", self.peer_addr());
-        if let Some((peer, peer_manager_channel_sender)) = self
-            .peer
-            .take()
-            .zip(self.peer_manager_channel_sender.take())
-            && let Err(e) = peer_manager_channel_sender
-                .send(PeerManagerChannelMessage::Closing(peer))
-                .await
-        {
-            error!("Failed to close peer connection: {}", e);
-        }
-    }
-
-    fn peer_addr(&self) -> String {
-        match self.peer.as_ref() {
-            Some(peer) => format!("{}:{}", peer.ip, peer.port),
-            None => "unknown".to_string(),
-        }
-    }
-
-    async fn piece_manager_request<T>(
-        &mut self,
-        build: impl FnOnce(oneshot::Sender<T>) -> PieceManagerMessage,
-    ) -> error::PeerConnectionResult<T> {
-        let (tx, rx) = oneshot::channel();
-        self.piece_manager_channel_sender.send(build(tx)).await?;
-        Ok(rx.await?)
     }
 
     fn our_handshake(&self) -> Handshake {
@@ -208,7 +197,10 @@ impl PeerConnection {
             match framed.next().await {
                 Some(Ok(WireItem::HandshakePartial { info_hash })) => {
                     if info_hash != self.info_hash {
-                        warn!("{}: handshake failed, info_hash mismatch", self.peer_addr());
+                        warn!(
+                            "{}: handshake failed, info_hash mismatch",
+                            peer_addr(&self.peer)
+                        );
                         return Err(error::PeerConnectionError::InfoHashMismatch);
                     }
                 }
@@ -224,7 +216,7 @@ impl PeerConnection {
                 _ => {
                     warn!(
                         "{}: handshake failed, unexpected message or connection closed",
-                        self.peer_addr()
+                        peer_addr(&self.peer)
                     );
                     return Err(error::PeerConnectionError::UnexpectedMessage);
                 }
@@ -240,7 +232,10 @@ impl PeerConnection {
             match framed.next().await {
                 Some(Ok(WireItem::HandshakePartial { info_hash })) => {
                     if info_hash != self.info_hash {
-                        warn!("{}: handshake failed, unknown info_hash", self.peer_addr());
+                        warn!(
+                            "{}: handshake failed, unknown info_hash",
+                            peer_addr(&self.peer)
+                        );
                         return Err(error::PeerConnectionError::InfoHashMismatch);
                     }
                     framed
@@ -261,11 +256,42 @@ impl PeerConnection {
                 _ => {
                     warn!(
                         "{}: handshake failed, unexpected message or connection closed",
-                        self.peer_addr()
+                        peer_addr(&self.peer)
                     );
                     return Err(error::PeerConnectionError::UnexpectedMessage);
                 }
             }
         }
     }
+}
+
+pub async fn close(
+    peer_manager_channel_sender: &mut Option<PeerManagerChannelSender>,
+    peer: &mut Option<Peer>,
+) {
+    debug!("{}: closing connection", peer_addr(peer));
+    if let Some((peer, peer_manager_channel_sender)) =
+        peer.take().zip(peer_manager_channel_sender.take())
+        && let Err(e) = peer_manager_channel_sender
+            .send(PeerManagerChannelMessage::Closing(peer))
+            .await
+    {
+        error!("Failed to close peer connection: {}", e);
+    }
+}
+
+fn peer_addr(peer: &Option<Peer>) -> String {
+    match peer.as_ref() {
+        Some(peer) => format!("{}:{}", peer.ip, peer.port),
+        None => "unknown".to_string(),
+    }
+}
+
+async fn piece_manager_request<T>(
+    piece_manager_channel_sender: &mut PieceManagerChannelSender,
+    build: impl FnOnce(oneshot::Sender<T>) -> PieceManagerMessage,
+) -> error::PeerConnectionResult<T> {
+    let (tx, rx) = oneshot::channel();
+    piece_manager_channel_sender.send(build(tx)).await?;
+    Ok(rx.await?)
 }
