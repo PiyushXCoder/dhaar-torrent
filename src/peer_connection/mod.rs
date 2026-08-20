@@ -7,7 +7,7 @@ use crate::{
 };
 
 use futures::{SinkExt, StreamExt};
-use tokio::{net::TcpStream, sync::oneshot, task::JoinSet};
+use tokio::{net::TcpStream, select, sync::oneshot, task::JoinSet, time};
 use tokio_util::codec::Framed;
 use tracing::{debug, error, warn};
 
@@ -97,12 +97,22 @@ impl PeerConnection {
             .send(WireItem::Message(Message::Bitfield(our_bitfield)))
             .await?;
 
-        let peer_bitfield: Bitfield =
-            if let Some(Ok(WireItem::Message(Message::Bitfield(bitfield)))) = framed.next().await {
-                bitfield
-            } else {
-                return Err(PeerConnectionError::PeerDisconnected);
-            };
+        let peer_bitfield: Bitfield;
+        select! {
+            _ = time::sleep(time::Duration::from_secs(30)) => {
+                return Err(PeerConnectionError::Timeout);
+            },
+            item = framed.next() => {
+                match item {
+                    Some(Ok(WireItem::Message(Message::Bitfield(bitfield)))) => {
+                        peer_bitfield = bitfield;
+                    }
+                    _ => {
+                        return Err(PeerConnectionError::PeerDisconnected);
+                    }
+                }
+            }
+        }
 
         let (incoming_sender, incoming_receiver) = channels::new_incoming_channel();
         let (outgoing_sender, mut outgoing_receiver) = channels::new_outgoing_channel();
@@ -194,32 +204,39 @@ impl PeerConnection {
             .send(WireItem::Handshake(self.our_handshake()))
             .await?;
         loop {
-            match framed.next().await {
-                Some(Ok(WireItem::HandshakePartial { info_hash })) => {
-                    if info_hash != self.info_hash {
-                        warn!(
-                            "{}: handshake failed, info_hash mismatch",
-                            peer_addr(&self.peer)
-                        );
-                        return Err(error::PeerConnectionError::InfoHashMismatch);
+            select! {
+                _ = time::sleep(time::Duration::from_secs(30)) => {
+                    return Err(PeerConnectionError::Timeout);
+                },
+                item = framed.next() => {
+                    match item {
+                        Some(Ok(WireItem::HandshakePartial { info_hash })) => {
+                            if info_hash != self.info_hash {
+                                warn!(
+                                    "{}: handshake failed, info_hash mismatch",
+                                    peer_addr(&self.peer)
+                                );
+                                return Err(error::PeerConnectionError::InfoHashMismatch);
+                            }
+                        }
+                        Some(Ok(WireItem::Handshake(handshake))) => {
+                            let Some(peer) = self.peer.as_mut() else {
+                                error!("Handshake failed: outbound connection missing peer");
+                                return Err(error::PeerConnectionError::PeerNotFound);
+                            };
+                            peer.peer_id = Some(handshake.peer_id);
+                            debug!("Outbound handshake complete with {}:{}", peer.ip, peer.port);
+                            return Ok(());
+                        }
+                        _ => {
+                            warn!(
+                                "{}: handshake failed, unexpected message or connection closed",
+                                peer_addr(&self.peer)
+                            );
+                            return Err(error::PeerConnectionError::UnexpectedMessage);
+                        }
                     }
-                }
-                Some(Ok(WireItem::Handshake(handshake))) => {
-                    let Some(peer) = self.peer.as_mut() else {
-                        error!("Handshake failed: outbound connection missing peer");
-                        return Err(error::PeerConnectionError::PeerNotFound);
-                    };
-                    peer.peer_id = Some(handshake.peer_id);
-                    debug!("Outbound handshake complete with {}:{}", peer.ip, peer.port);
-                    return Ok(());
-                }
-                _ => {
-                    warn!(
-                        "{}: handshake failed, unexpected message or connection closed",
-                        peer_addr(&self.peer)
-                    );
-                    return Err(error::PeerConnectionError::UnexpectedMessage);
-                }
+                },
             }
         }
     }
@@ -229,36 +246,43 @@ impl PeerConnection {
         framed: &mut Framed<TcpStream, WireCodec>,
     ) -> error::PeerConnectionResult<()> {
         loop {
-            match framed.next().await {
-                Some(Ok(WireItem::HandshakePartial { info_hash })) => {
-                    if info_hash != self.info_hash {
-                        warn!(
-                            "{}: handshake failed, unknown info_hash",
-                            peer_addr(&self.peer)
-                        );
-                        return Err(error::PeerConnectionError::InfoHashMismatch);
+            select! {
+                _ = time::sleep(time::Duration::from_secs(30)) => {
+                    return Err(PeerConnectionError::Timeout);
+                },
+                item = framed.next() => {
+                    match item {
+                        Some(Ok(WireItem::HandshakePartial { info_hash })) => {
+                            if info_hash != self.info_hash {
+                                warn!(
+                                    "{}: handshake failed, unknown info_hash",
+                                    peer_addr(&self.peer)
+                                );
+                                return Err(error::PeerConnectionError::InfoHashMismatch);
+                            }
+                            framed
+                                .send(WireItem::Handshake(self.our_handshake()))
+                                .await?;
+                            debug!("Inbound handshake info_hash verified, replied with our handshake");
+                        }
+                        Some(Ok(WireItem::Handshake(handshake))) => {
+                            let addr = framed.get_ref().peer_addr()?;
+                            self.peer = Some(Peer {
+                                peer_id: Some(handshake.peer_id),
+                                ip: addr.ip().to_string(),
+                                port: addr.port(),
+                            });
+                            debug!("Inbound handshake complete with {}", addr);
+                            return Ok(());
+                        }
+                        _ => {
+                            warn!(
+                                "{}: handshake failed, unexpected message or connection closed",
+                                peer_addr(&self.peer)
+                            );
+                            return Err(error::PeerConnectionError::UnexpectedMessage);
+                        }
                     }
-                    framed
-                        .send(WireItem::Handshake(self.our_handshake()))
-                        .await?;
-                    debug!("Inbound handshake info_hash verified, replied with our handshake");
-                }
-                Some(Ok(WireItem::Handshake(handshake))) => {
-                    let addr = framed.get_ref().peer_addr()?;
-                    self.peer = Some(Peer {
-                        peer_id: Some(handshake.peer_id),
-                        ip: addr.ip().to_string(),
-                        port: addr.port(),
-                    });
-                    debug!("Inbound handshake complete with {}", addr);
-                    return Ok(());
-                }
-                _ => {
-                    warn!(
-                        "{}: handshake failed, unexpected message or connection closed",
-                        peer_addr(&self.peer)
-                    );
-                    return Err(error::PeerConnectionError::UnexpectedMessage);
                 }
             }
         }

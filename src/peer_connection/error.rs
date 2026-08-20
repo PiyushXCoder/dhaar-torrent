@@ -35,6 +35,8 @@ pub enum PeerConnectionError {
     PeerManagerSend(#[from] SendError<PeerManagerChannelMessage>),
     #[error("piece manager dropped response channel: {0}")]
     ResponseChannelDropped(#[from] RecvError),
+    #[error("timeout")]
+    Timeout,
 }
 
 pub type PeerConnectionResult<T> = std::result::Result<T, PeerConnectionError>;
