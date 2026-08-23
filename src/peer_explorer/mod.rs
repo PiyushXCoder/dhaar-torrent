@@ -31,7 +31,7 @@ impl PeerExplorer {
         while let Some(message) = peer_source_channel_receiver.recv().await {
             match message {
                 channel::PeerSourceChannelMessage::PeerFound(peer) => {
-                    if dedup.insert(peer.clone()) {
+                    if dedup.insert(peer) {
                         debug!("New unique peer discovered, {} total so far", dedup.len());
                         peer_explorer_channel_sender
                             .send(channel::PeerExplorerChannelMessage::PeerFound(peer))

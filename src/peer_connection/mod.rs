@@ -39,7 +39,7 @@ impl PeerConnection {
     ) -> PeerConnectionResult<Self> {
         let stream = TcpStream::connect(peer.address).await.map_err(|source| {
             PeerConnectionError::ConnectFailed {
-                peer: Box::new(peer.clone()),
+                peer: Box::new(peer),
                 source,
             }
         })?;
