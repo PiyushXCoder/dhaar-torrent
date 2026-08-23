@@ -15,18 +15,62 @@ pub enum PieceManagerMessage {
     Bitfield {
         response_sender: OneShotSender<Bitfield>,
     },
+    GetAllInterestedPieces {
+        bitfield: Bitfield,
+        response_sender: OneShotSender<Vec<u32>>,
+    },
+    GetNextInterestedPiece {
+        bitfield: Bitfield,
+        response_sender: OneShotSender<Option<u32>>,
+    },
     AmInterested {
         bitfield: Bitfield,
         response_sender: OneShotSender<bool>,
     },
-    LockNextPiece {
-        bitfield: Bitfield,
-        response_sender: OneShotSender<Option<u32>>,
-    },
 
-    LockNextBlock {
+    LockPiece {
         piece_index: u32,
         response_sender: OneShotSender<Option<u32>>,
+    },
+    UnlockPiece {
+        piece_index: u32,
+    },
+    CompletedPiece {
+        response_sender: OneShotSender<u32>,
+    },
+    TotalPieces {
+        response_sender: OneShotSender<u32>,
+    },
+    PieceLength {
+        response_sender: OneShotSender<u64>,
+    },
+    VerifyPiece {
+        piece_index: u32,
+        response_sender: OneShotSender<bool>,
+    },
+    CompletePiece {
+        piece_index: u32,
+        response_sender: OneShotSender<bool>,
+    },
+    /// Forgets a piece's block progress so it can be fetched again from
+    /// scratch, used when the assembled piece fails its hash check.
+    ResetPiece {
+        piece_index: u32,
+    },
+
+    GetIncompleteBlocks {
+        piece_index: u32,
+        response_sender: OneShotSender<Vec<u32>>,
+    },
+
+    LockBlock {
+        piece_index: u32,
+        block_index: u32,
+        response_sender: OneShotSender<bool>,
+    },
+    UnlockBlock {
+        piece_index: u32,
+        block_index: u32,
     },
     ReceiveBlock {
         piece_index: u32,
@@ -37,23 +81,6 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         block_index: u32,
         response_sender: OneShotSender<Vec<u8>>,
-    },
-    VerifyPiece {
-        piece_index: u32,
-        response_sender: OneShotSender<bool>,
-    },
-    CompletePiece {
-        piece_index: u32,
-        response_sender: OneShotSender<bool>,
-    },
-    UnlockPiece {
-        piece_index: u32,
-    },
-    CompletedPiece {
-        response_sender: OneShotSender<u32>,
-    },
-    TotalPieces {
-        response_sender: OneShotSender<u32>,
     },
 }
 

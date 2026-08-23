@@ -97,6 +97,13 @@ impl PeerConnection {
             .send(WireItem::Message(Message::Bitfield(our_bitfield)))
             .await?;
 
+        let piece_length = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
+            PieceManagerMessage::PieceLength {
+                response_sender: tx,
+            }
+        })
+        .await?;
+
         let peer_bitfield: Bitfield;
         select! {
             _ = time::sleep(time::Duration::from_secs(30)) => {
@@ -154,6 +161,7 @@ impl PeerConnection {
             self.info_hash,
             self.peer_id,
             peer_bitfield,
+            piece_length,
             self.peer_manager_channel_sender.clone(),
             self.piece_manager_channel_sender.clone(),
             incoming_receiver,
