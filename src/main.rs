@@ -8,6 +8,7 @@ use dhaar_torrent::{
     },
     torrent_parser::TorrentParser,
 };
+use tokio::task::JoinSet;
 use tracing::error;
 
 #[tokio::main]
@@ -33,10 +34,9 @@ async fn main() {
     let (piece_manager_channel_sender, piece_manager_channel_receiver) =
         new_piece_manager_channel();
 
-    let tracker_manager = TrackerManager::new(vec![torrent.announce], &torrent.info_hash, &peer_id);
-    let mut peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
-    let join_handle1 = peer_explorer.start(peer_explorer_channel_sender).await;
-
+    let tracker_manager =
+        TrackerManager::new(torrent.announce_urls(), &torrent.info_hash, &peer_id);
+    let peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
     let piece_writer = DiskPieceWriter::new(
         torrent.info.piece_length,
         &torrent.info.name,
@@ -49,19 +49,19 @@ async fn main() {
         torrent.info.piece_length,
         piece_writer,
     );
-    let join_handle2 = piece_manager.start(piece_manager_channel_receiver).await;
-
     let retry_after_delay_peer_selection_strategy = RetryAfterDelayPeerSelectionStrategy::new();
     let peer_manager = PeerManager::new(
         retry_after_delay_peer_selection_strategy,
         &torrent.info_hash,
         &peer_id,
     );
-    let join_handle3 = peer_manager
-        .start(peer_explorer_channel_receiver, piece_manager_channel_sender)
-        .await;
 
-    join_handle1.await.unwrap();
-    join_handle2.await.unwrap();
-    join_handle3.await.unwrap();
+    let mut join_set: JoinSet<()> = JoinSet::new();
+    join_set.spawn(peer_explorer.start(peer_explorer_channel_sender));
+    join_set.spawn(piece_manager.start(piece_manager_channel_receiver));
+    join_set
+        .spawn(peer_manager.start(peer_explorer_channel_receiver, piece_manager_channel_sender));
+    join_set.join_next().await;
+
+    println!("{:?}", torrent);
 }

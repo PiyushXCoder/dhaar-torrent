@@ -1,4 +1,5 @@
 use sha1::Digest;
+use std::collections::HashSet;
 use std::path::Path;
 
 use bencode::{
@@ -70,5 +71,17 @@ impl Torrent {
         let mut torrent = bencode::from_bytes::<Torrent>(&torrent_data).unwrap();
         torrent.info_hash = info_hash(&torrent_data);
         Ok(torrent)
+    }
+
+    /// Every tracker URL for this torrent: the primary `announce` first, then the
+    /// `announce-list` tiers in order (BEP 12 lists them by preference). Duplicates
+    /// are dropped — tiers normally repeat the primary URL.
+    pub fn announce_urls(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        std::iter::once(&self.announce)
+            .chain(self.announce_list.iter().flatten().flatten())
+            .filter(|url| seen.insert(*url))
+            .cloned()
+            .collect()
     }
 }

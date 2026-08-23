@@ -43,6 +43,7 @@ pub struct RequestManager {
 }
 
 impl RequestManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: Option<Peer>,
         info_hash: [u8; 20],
@@ -74,16 +75,14 @@ impl RequestManager {
     }
 
     pub async fn start(mut self) {
-        tokio::spawn(async move {
-            match self.run().await {
-                Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                    debug!("{}: connection ended", peer_addr(&self.peer));
-                }
-                Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        match self.run().await {
+            Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
+                debug!("{}: connection ended", peer_addr(&self.peer));
             }
-            self.unlock_all().await;
-            close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
-        });
+            Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        }
+        self.unlock_all().await;
+        close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {

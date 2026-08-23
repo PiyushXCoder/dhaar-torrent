@@ -72,15 +72,13 @@ impl PeerConnection {
     /// itself, it just reports why it stopped; teardown happens here so every
     /// error path funnels through exactly one `close`.
     pub async fn start(mut self) {
-        tokio::spawn(async move {
-            match self.run().await {
-                Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                    debug!("{}: connection ended", peer_addr(&self.peer));
-                }
-                Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        match self.run().await {
+            Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
+                debug!("{}: connection ended", peer_addr(&self.peer));
             }
-            close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
-        });
+            Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        }
+        close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
