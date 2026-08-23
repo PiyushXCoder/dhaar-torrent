@@ -106,8 +106,15 @@ async fn announce_tracker(
             min_interval
         );
         for peer in peers {
+            let peer = match crate::peer_explorer::Peer::try_from(peer) {
+                Ok(peer) => peer,
+                Err(e) => {
+                    warn!("Skipping peer with unparseable address: {}", e);
+                    continue;
+                }
+            };
             peer_explorer_channel_sender
-                .send(PeerSourceChannelMessage::PeerFound(peer.into()))
+                .send(PeerSourceChannelMessage::PeerFound(peer))
                 .await
                 .unwrap();
         }

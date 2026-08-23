@@ -14,6 +14,8 @@ pub enum Error {
     TomlSer(#[from] toml::ser::Error),
     #[error("bencode error: {0}")]
     Bencode(#[from] bencode::error::Error),
+    #[error("address parse error: {0}")]
+    AddrParse(#[from] std::net::AddrParseError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
