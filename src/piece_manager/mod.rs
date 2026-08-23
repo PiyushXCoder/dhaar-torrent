@@ -1,6 +1,5 @@
 use serde_bytes::ByteBuf;
 use sha1::Digest;
-use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 pub mod channel;
@@ -16,22 +15,24 @@ where
     E: std::error::Error + Send + Sync + 'static,
     W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
-    piece_length: u64,
-    pieces: Vec<Piece>,
-    piece_writer: W,
+    pub piece_length: u64,
+    pub total_length: u64,
+    pub pieces: Vec<Piece>,
+    // TODO: expose data from piece writer
+    pub piece_writer: W,
 }
 
 pub struct Piece {
     block_length: Option<u64>,
-    blocks: Option<Vec<Block>>,
+    pub blocks: Option<Vec<Block>>,
     hash: [u8; 20],
-    complete: bool,
+    pub complete: bool,
     locked: bool,
 }
 
 pub struct Block {
     locked: bool,
-    complete: bool,
+    pub complete: bool,
 }
 
 impl Piece {
@@ -57,7 +58,12 @@ where
     E: std::error::Error + Send + Sync + 'static,
     W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
-    pub fn new(piece_hashes: &ByteBuf, piece_length: u64, piece_writer: W) -> Self {
+    pub fn new(
+        piece_hashes: &ByteBuf,
+        piece_length: u64,
+        total_length: u64,
+        piece_writer: W,
+    ) -> Self {
         let piceces = piece_hashes
             .chunks(20)
             .map(|hash| Piece {
@@ -71,6 +77,7 @@ where
 
         Self {
             piece_length,
+            total_length,
             pieces: piceces,
             piece_writer,
         }
@@ -79,127 +86,140 @@ where
     pub async fn start(
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
-    ) -> JoinHandle<()> {
+    ) {
         self.piece_writer.initialize().await.unwrap();
         info!(
             "Piece manager started: {} pieces, {} bytes/piece",
             self.total_pieces(),
             self.piece_length
         );
-        tokio::spawn(async move {
-            while let Some(msg) = piece_manager_channel_receiver.recv().await {
-                match msg {
-                    PieceManagerMessage::HasPiece {
-                        piece_index,
-                        response_sender,
-                    } => {
-                        response_sender.send(self.has_piece(piece_index)).unwrap();
-                    }
-                    PieceManagerMessage::Bitfield { response_sender } => {
-                        response_sender.send(self.bitfield()).unwrap();
-                    }
-                    PieceManagerMessage::AmInterested {
-                        bitfield,
-                        response_sender,
-                    } => {
-                        response_sender.send(self.am_interested(&bitfield)).unwrap();
-                    }
-                    PieceManagerMessage::GetAllInterestedPieces {
-                        bitfield,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.get_all_interested_pieces(&bitfield))
-                            .unwrap();
-                    }
-                    PieceManagerMessage::GetNextInterestedPiece {
-                        bitfield,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.get_next_interested_picecs(&bitfield))
-                            .unwrap();
-                    }
-                    PieceManagerMessage::LockPiece {
-                        piece_index,
-                        response_sender,
-                    } => {
-                        response_sender.send(self.lock_piece(piece_index)).unwrap();
-                    }
-                    PieceManagerMessage::LockBlock {
-                        piece_index,
-                        block_index,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.lock_block(piece_index, block_index))
-                            .unwrap();
-                    }
-                    PieceManagerMessage::UnlockBlock {
-                        piece_index,
-                        block_index,
-                    } => {
-                        self.unlock_block(piece_index, block_index);
-                    }
-                    PieceManagerMessage::ReceiveBlock {
-                        piece_index,
-                        block_index,
-                        block_data,
-                    } => {
-                        self.receive_block(piece_index, block_index, block_data)
-                            .await;
-                    }
-                    PieceManagerMessage::ReadBlock {
-                        piece_index,
-                        block_index,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.read_block(piece_index, block_index).await)
-                            .unwrap();
-                    }
-                    PieceManagerMessage::GetIncompleteBlocks {
-                        piece_index,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.get_incomplete_blocks(piece_index))
-                            .unwrap();
-                    }
-                    PieceManagerMessage::VerifyPiece {
-                        piece_index,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.verify_piece(piece_index).await)
-                            .unwrap();
-                    }
-                    PieceManagerMessage::CompletePiece {
-                        piece_index,
-                        response_sender,
-                    } => {
-                        response_sender
-                            .send(self.complete_piece(piece_index).await)
-                            .unwrap();
-                    }
-                    PieceManagerMessage::UnlockPiece { piece_index } => {
-                        self.unlock_piece(piece_index);
-                    }
-                    PieceManagerMessage::CompletedPiece { response_sender } => {
-                        response_sender.send(self.completed_pieces()).unwrap();
-                    }
-                    PieceManagerMessage::TotalPieces { response_sender } => {
-                        response_sender.send(self.total_pieces()).unwrap();
-                    }
-                    PieceManagerMessage::PieceLength { response_sender } => {
-                        response_sender.send(self.piece_length).unwrap();
-                    }
-                    PieceManagerMessage::ResetPiece { piece_index } => {
-                        self.reset_piece(piece_index);
-                    }
+        while let Some(msg) = piece_manager_channel_receiver.recv().await {
+            match msg {
+                PieceManagerMessage::HasPiece {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender.send(self.has_piece(piece_index)).unwrap();
+                }
+                PieceManagerMessage::Bitfield { response_sender } => {
+                    response_sender.send(self.bitfield()).unwrap();
+                }
+                PieceManagerMessage::AmInterested {
+                    bitfield,
+                    response_sender,
+                } => {
+                    response_sender.send(self.am_interested(&bitfield)).unwrap();
+                }
+                PieceManagerMessage::GetAllInterestedPieces {
+                    bitfield,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.get_all_interested_pieces(&bitfield))
+                        .unwrap();
+                }
+                PieceManagerMessage::GetNextInterestedPiece {
+                    bitfield,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.get_next_interested_piece(&bitfield))
+                        .unwrap();
+                }
+                PieceManagerMessage::LockPiece {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender.send(self.lock_piece(piece_index)).unwrap();
+                }
+                PieceManagerMessage::LockBlock {
+                    piece_index,
+                    block_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.lock_block(piece_index, block_index))
+                        .unwrap();
+                }
+                PieceManagerMessage::UnlockBlock {
+                    piece_index,
+                    block_index,
+                } => {
+                    self.unlock_block(piece_index, block_index);
+                }
+                PieceManagerMessage::ReceiveBlock {
+                    piece_index,
+                    block_index,
+                    block_data,
+                } => {
+                    self.receive_block(piece_index, block_index, block_data)
+                        .await;
+                }
+                PieceManagerMessage::ReadBlock {
+                    piece_index,
+                    block_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.read_block(piece_index, block_index).await)
+                        .unwrap();
+                }
+                PieceManagerMessage::GetIncompleteBlocks {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.get_incomplete_blocks(piece_index))
+                        .unwrap();
+                }
+                PieceManagerMessage::VerifyPiece {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.verify_piece(piece_index).await)
+                        .unwrap();
+                }
+                PieceManagerMessage::CompletePiece {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.complete_piece(piece_index).await)
+                        .unwrap();
+                }
+                PieceManagerMessage::UnlockPiece { piece_index } => {
+                    self.unlock_piece(piece_index);
+                }
+                PieceManagerMessage::CompletedPiece { response_sender } => {
+                    response_sender.send(self.completed_pieces()).unwrap();
+                }
+                PieceManagerMessage::TotalPieces { response_sender } => {
+                    response_sender.send(self.total_pieces()).unwrap();
+                }
+                PieceManagerMessage::PieceLength { response_sender } => {
+                    response_sender.send(self.piece_length).unwrap();
+                }
+                PieceManagerMessage::PieceLengthAt {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender.send(self.piece_size(piece_index)).unwrap();
+                }
+                PieceManagerMessage::ResetPiece { piece_index } => {
+                    self.reset_piece(piece_index);
                 }
             }
-        })
+        }
+    }
+
+    /// Bytes in `piece_index`. Every piece is `piece_length` except the last,
+    /// which is whatever is left over — treating it as full length makes its
+    /// hash, its block count and its block requests all wrong.
+    fn piece_size(&self, piece_index: u32) -> u64 {
+        let offset = piece_index as u64 * self.piece_length;
+        self.piece_length
+            .min(self.total_length.saturating_sub(offset))
     }
 
     fn has_piece(&self, piece_index: u32) -> bool {
@@ -241,7 +261,7 @@ where
     /// Claims `piece_index` for one peer. `None` means somebody else got it
     /// first, or it is already done.
     fn lock_piece(&mut self, piece_index: u32) -> Option<u32> {
-        let piece_length = self.piece_length;
+        let piece_length = self.piece_size(piece_index);
         let piece = self.pieces.get_mut(piece_index as usize)?;
         if piece.complete || piece.locked {
             return None;
@@ -253,7 +273,7 @@ where
 
     /// Claims one block inside an already locked piece.
     fn lock_block(&mut self, piece_index: u32, block_index: u32) -> bool {
-        let piece_length = self.piece_length;
+        let piece_length = self.piece_size(piece_index);
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return false;
         };
@@ -300,7 +320,8 @@ where
     }
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
-        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+        let piece_size = self.piece_size(piece_index);
+        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -315,7 +336,11 @@ where
         let Some(piece) = self.pieces.get(piece_index as usize) else {
             return false;
         };
-        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+        let Ok(data) = self
+            .piece_writer
+            .read(piece_index, 0, self.piece_size(piece_index))
+            .await
+        else {
             return false;
         };
         let digest: [u8; 20] = sha1::Sha1::digest(&data).into();
@@ -396,7 +421,7 @@ where
         }
     }
 
-    fn get_next_interested_picecs(&self, bitfield: &Bitfield) -> Option<u32> {
+    fn get_next_interested_piece(&self, bitfield: &Bitfield) -> Option<u32> {
         self.get_all_interested_pieces(bitfield).first().cloned()
     }
 }

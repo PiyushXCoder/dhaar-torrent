@@ -1,3 +1,8 @@
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+};
+
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -117,12 +122,12 @@ impl std::hash::Hash for Peer {
     }
 }
 
-impl From<Peer> for crate::peer_explorer::Peer {
-    fn from(val: Peer) -> Self {
-        crate::peer_explorer::Peer {
+impl TryFrom<Peer> for crate::peer_explorer::Peer {
+    type Error = Error;
+    fn try_from(val: Peer) -> Result<Self> {
+        Ok(crate::peer_explorer::Peer {
             peer_id: val.peer_id,
-            ip: val.ip,
-            port: val.port,
-        }
+            address: SocketAddr::new(IpAddr::from_str(val.ip.as_str())?, val.port),
+        })
     }
 }

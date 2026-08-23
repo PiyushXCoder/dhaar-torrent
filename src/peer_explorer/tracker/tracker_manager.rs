@@ -54,6 +54,10 @@ impl PeerSource for TrackerManager {
             scheduler_heap.push(Reverse(tracker));
         }
 
+        if scheduler_heap.is_empty() {
+            warn!("No tracker URLs in the torrent, this source will find no peers");
+        }
+
         let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id);
         let join_handle = tokio::spawn(async move {
             announce_tracker(&mut scheduler_heap, &query, &peer_source_channel_sender).await;
@@ -106,8 +110,15 @@ async fn announce_tracker(
             min_interval
         );
         for peer in peers {
+            let peer = match crate::peer_explorer::Peer::try_from(peer) {
+                Ok(peer) => peer,
+                Err(e) => {
+                    warn!("Skipping peer with unparseable address: {}", e);
+                    continue;
+                }
+            };
             peer_explorer_channel_sender
-                .send(PeerSourceChannelMessage::PeerFound(peer.into()))
+                .send(PeerSourceChannelMessage::PeerFound(peer))
                 .await
                 .unwrap();
         }

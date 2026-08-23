@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
@@ -35,12 +37,12 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
     ) -> PeerConnectionResult<Self> {
-        let stream = TcpStream::connect(format!("{}:{}", peer.ip, peer.port))
-            .await
-            .map_err(|source| PeerConnectionError::ConnectFailed {
+        let stream = TcpStream::connect(peer.address).await.map_err(|source| {
+            PeerConnectionError::ConnectFailed {
                 peer: Box::new(peer.clone()),
                 source,
-            })?;
+            }
+        })?;
 
         Ok(PeerConnection {
             peer: Some(peer),
@@ -72,15 +74,13 @@ impl PeerConnection {
     /// itself, it just reports why it stopped; teardown happens here so every
     /// error path funnels through exactly one `close`.
     pub async fn start(mut self) {
-        tokio::spawn(async move {
-            match self.run().await {
-                Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                    debug!("{}: connection ended", peer_addr(&self.peer));
-                }
-                Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        match self.run().await {
+            Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
+                debug!("{}: connection ended", peer_addr(&self.peer));
             }
-            close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
-        });
+            Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+        }
+        close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
@@ -233,7 +233,7 @@ impl PeerConnection {
                                 return Err(error::PeerConnectionError::PeerNotFound);
                             };
                             peer.peer_id = Some(handshake.peer_id);
-                            debug!("Outbound handshake complete with {}:{}", peer.ip, peer.port);
+                            debug!("Outbound handshake complete with {}", peer.address);
                             return Ok(());
                         }
                         _ => {
@@ -277,8 +277,7 @@ impl PeerConnection {
                             let addr = framed.get_ref().peer_addr()?;
                             self.peer = Some(Peer {
                                 peer_id: Some(handshake.peer_id),
-                                ip: addr.ip().to_string(),
-                                port: addr.port(),
+                                address: SocketAddr::new(addr.ip(), addr.port()),
                             });
                             debug!("Inbound handshake complete with {}", addr);
                             return Ok(());
@@ -314,7 +313,7 @@ pub async fn close(
 
 fn peer_addr(peer: &Option<Peer>) -> String {
     match peer.as_ref() {
-        Some(peer) => format!("{}:{}", peer.ip, peer.port),
+        Some(peer) => format!("{}", peer.address),
         None => "unknown".to_string(),
     }
 }

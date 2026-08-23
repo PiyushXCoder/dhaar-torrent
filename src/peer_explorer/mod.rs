@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, net::SocketAddr};
 
 use tokio::task::JoinHandle;
 use tracing::{debug, error};
@@ -9,18 +9,15 @@ pub mod channel;
 pub mod tracker;
 
 pub struct PeerExplorer {
-    pub peer_sources: Vec<Box<dyn PeerSource>>,
+    pub peer_sources: Vec<Box<dyn PeerSource + Send>>,
 }
 
 impl PeerExplorer {
-    pub fn new(peer_sources: Vec<Box<dyn PeerSource>>) -> PeerExplorer {
+    pub fn new(peer_sources: Vec<Box<dyn PeerSource + Send>>) -> PeerExplorer {
         PeerExplorer { peer_sources }
     }
 
-    pub async fn start(
-        &mut self,
-        peer_explorer_channel_sender: channel::PeerExplorerChannelSender,
-    ) -> JoinHandle<()> {
+    pub async fn start(mut self, peer_explorer_channel_sender: channel::PeerExplorerChannelSender) {
         let (peer_source_channel_sender, mut peer_source_channel_receiver) =
             channel::new_peer_source_channel();
 
@@ -31,21 +28,19 @@ impl PeerExplorer {
         }
 
         let mut dedup = HashSet::new();
-        tokio::spawn(async move {
-            while let Some(message) = peer_source_channel_receiver.recv().await {
-                match message {
-                    channel::PeerSourceChannelMessage::PeerFound(peer) => {
-                        if dedup.insert(peer.clone()) {
-                            debug!("New unique peer discovered, {} total so far", dedup.len());
-                            peer_explorer_channel_sender
-                                .send(channel::PeerExplorerChannelMessage::PeerFound(peer))
-                                .await
-                                .expect("Failed to send peer from Peer Explorer");
-                        }
+        while let Some(message) = peer_source_channel_receiver.recv().await {
+            match message {
+                channel::PeerSourceChannelMessage::PeerFound(peer) => {
+                    if dedup.insert(peer.clone()) {
+                        debug!("New unique peer discovered, {} total so far", dedup.len());
+                        peer_explorer_channel_sender
+                            .send(channel::PeerExplorerChannelMessage::PeerFound(peer))
+                            .await
+                            .expect("Failed to send peer from Peer Explorer");
                     }
                 }
             }
-        })
+        }
     }
 }
 
@@ -57,22 +52,20 @@ pub trait PeerSource {
     ) -> Result<JoinHandle<()>>;
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone, Copy, Eq)]
 pub struct Peer {
     pub peer_id: Option<[u8; 20]>,
-    pub ip: String,
-    pub port: u16,
+    pub address: SocketAddr,
 }
 
 impl PartialEq for Peer {
     fn eq(&self, other: &Self) -> bool {
-        self.ip == other.ip && self.port == other.port
+        self.address == other.address
     }
 }
 
 impl std::hash::Hash for Peer {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ip.hash(state);
-        self.port.hash(state);
+        self.address.hash(state);
     }
 }

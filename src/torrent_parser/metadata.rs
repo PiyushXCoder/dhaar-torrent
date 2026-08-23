@@ -1,4 +1,5 @@
 use sha1::Digest;
+use std::collections::HashSet;
 use std::path::Path;
 
 use bencode::{
@@ -26,6 +27,15 @@ pub struct Info {
     pub files: Option<Vec<File>>,
 }
 
+impl Info {
+    /// Total bytes of payload. Single-file torrents carry it directly;
+    /// multi-file ones only describe it as the sum of their files.
+    pub fn total_length(&self) -> u64 {
+        self.length
+            .unwrap_or_else(|| self.files.iter().flatten().map(|file| file.length).sum())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct File {
     pub length: u64,
@@ -41,7 +51,7 @@ struct TorrentFileRawInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Torrent {
     pub info: Info,
-    pub announce: String,
+    pub announce: Option<String>,
     #[serde(rename = "announce-list")]
     pub announce_list: Option<Vec<Vec<String>>>,
     #[serde(
@@ -70,5 +80,19 @@ impl Torrent {
         let mut torrent = bencode::from_bytes::<Torrent>(&torrent_data).unwrap();
         torrent.info_hash = info_hash(&torrent_data);
         Ok(torrent)
+    }
+
+    /// Every tracker URL for this torrent: the primary `announce` first, then the
+    /// `announce-list` tiers in order (BEP 12 lists them by preference). Duplicates
+    /// are dropped — tiers normally repeat the primary URL. `announce` is absent
+    /// in announce-list-only torrents, so the list alone can carry every tracker.
+    pub fn announce_urls(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.announce
+            .iter()
+            .chain(self.announce_list.iter().flatten().flatten())
+            .filter(|url| seen.insert(*url))
+            .cloned()
+            .collect()
     }
 }

@@ -24,7 +24,7 @@ pub enum PeerConnectionError {
     #[error("peer disconnected")]
     PeerDisconnected,
     /// Carries the peer back so the caller can requeue it instead of losing it.
-    #[error("failed to connect to peer {}:{}: {source}", peer.ip, peer.port)]
+    #[error("failed to connect to peer {}: {source}", peer.address)]
     ConnectFailed {
         peer: Box<Peer>,
         source: std::io::Error,

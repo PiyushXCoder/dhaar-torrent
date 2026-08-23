@@ -6,9 +6,15 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-~50% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to 8 outstanding requests per peer), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout.
+~50% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to 8 outstanding requests per peer), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout. The last piece of a torrent is short, and its block count, request lengths, hash check and disk reads are all sized to it rather than to the full piece length.
 
-Still missing: keep-alive, resume across restarts, seeding, DHT, UDP trackers, and magnet links.
+Still missing: keep-alive, resume across restarts, seeding, inbound connections, web seeds, DHT, UDP trackers, and magnet links.
+
+### Known rough edges
+
+- **Trackers are the only peer source.** `announce` is optional and `announce-list` alone is enough, but a torrent that ships neither — Arch Linux's ISO torrent, for example, which carries only a BEP 19 `url-list` of web seeds — parses fine and then finds no peers at all. It logs a warning and sits idle.
+- **Nothing happens when the download finishes.** There is no completion state: the peer manager keeps dialing, connections go silent once no piece is interesting, the 60s idle timeout kills them, and each one is requeued for a retry 23 seconds later. The result is a steady stream of handshake failures in the log after the download is already on disk.
+- **Outbound only.** There is no TCP listener, so no peer can ever connect to us.
 
 ### Architecture
 
@@ -39,6 +45,10 @@ Components are independent tokio tasks talking over mpsc channels:
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
 - [ ] Periodic keep-alive messages
+- [ ] Completion state — stop dialing peers once every piece is verified
+- [ ] Inbound connections — TCP listener (`PeerConnection::from_stream` exists, nothing calls it)
+- [ ] Tracker reporting — real `left` and `started`/`completed`/`stopped` events (both are hardcoded today)
+- [ ] Web seeds (BEP 19) — HTTP `url-list` sources for trackerless torrents
 - [ ] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
 - [ ] `Download` wrapper struct — pull the wiring out of `main.rs` (currently cluttered)
 - [ ] Status/progress events — download internals report events back to `main` instead of being silent
