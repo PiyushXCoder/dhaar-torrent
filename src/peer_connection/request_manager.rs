@@ -35,6 +35,7 @@ pub struct RequestManager {
     pub peer_bitfield: Bitfield,
     pub piece_length: u64,
     pub active_piece: Option<u32>,
+    pub active_piece_length: u64,
     pub active_blocks: Vec<u32>,
     pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
@@ -66,6 +67,7 @@ impl RequestManager {
             peer_bitfield,
             piece_length,
             active_piece: None,
+            active_piece_length: piece_length,
             active_blocks: Vec::new(),
             peer_manager_channel_sender,
             piece_manager_channel_sender,
@@ -301,17 +303,24 @@ impl RequestManager {
                 .await?;
             if locked.is_some() {
                 self.active_piece = Some(piece_index);
+                self.active_piece_length = self
+                    .ask(|response_sender| PieceManagerMessage::PieceLengthAt {
+                        piece_index,
+                        response_sender,
+                    })
+                    .await?;
                 return Ok(());
             }
         }
         Ok(())
     }
 
-    /// Byte range of one block inside a piece. Only the final block of a
-    /// piece is ever short.
+    /// Byte range of one block inside the active piece. The final block of a
+    /// piece is short, and every block count is measured against the active
+    /// piece's own length — the last piece of a torrent is itself short.
     fn block_bounds(&self, block_index: u32) -> (u32, u32) {
         let begin = block_index as u64 * BLOCK_SIZE;
-        let length = BLOCK_SIZE.min(self.piece_length.saturating_sub(begin));
+        let length = BLOCK_SIZE.min(self.active_piece_length.saturating_sub(begin));
         (begin as u32, length as u32)
     }
 
@@ -385,6 +394,7 @@ impl RequestManager {
     async fn finish_piece(&mut self, piece_index: u32) -> PeerConnectionResult<()> {
         self.active_blocks.clear();
         self.active_piece = None;
+        self.active_piece_length = self.piece_length;
 
         let valid = self
             .ask(|response_sender| PieceManagerMessage::VerifyPiece {

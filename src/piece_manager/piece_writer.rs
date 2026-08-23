@@ -12,7 +12,12 @@ pub trait PieceWriter {
     type Error;
 
     async fn initialize(&self) -> Result<(), Self::Error>;
-    async fn read(&self, piece_index: u32, piece_offset: u64) -> Result<Vec<u8>, Self::Error>;
+    async fn read(
+        &self,
+        piece_index: u32,
+        piece_offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, Self::Error>;
     async fn write(
         &self,
         piece_index: u32,
@@ -25,6 +30,7 @@ pub trait PieceWriter {
 pub struct DiskPieceWriter {
     pub temp_file: PathBuf,
     pub piece_length: u64,
+    pub total_length: u64,
     pub name: String,
     pub length: Option<u64>,
     pub md5sum: Option<String>,
@@ -34,6 +40,7 @@ pub struct DiskPieceWriter {
 impl DiskPieceWriter {
     pub fn new(
         piece_length: u64,
+        total_length: u64,
         name: &String,
         length: Option<u64>,
         md5sum: &Option<String>,
@@ -45,6 +52,7 @@ impl DiskPieceWriter {
         Self {
             temp_file,
             piece_length,
+            total_length,
             name: name.clone(),
             length,
             md5sum: md5sum.clone(),
@@ -57,19 +65,31 @@ impl DiskPieceWriter {
 impl PieceWriter for DiskPieceWriter {
     type Error = std::io::Error;
     async fn initialize(&self) -> Result<(), Self::Error> {
-        if !self.temp_file.exists() {
-            let file = File::create(&self.temp_file).await?;
-            file.set_len(self.piece_length).await?;
+        // A temp file left by an older run can be the wrong size, and a short
+        // one makes every read past its end fail.
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.temp_file)
+            .await?;
+        if file.metadata().await?.len() != self.total_length {
+            file.set_len(self.total_length).await?;
         }
         Ok(())
     }
-    async fn read(&self, piece_index: u32, piece_offset: u64) -> Result<Vec<u8>, Self::Error> {
+    async fn read(
+        &self,
+        piece_index: u32,
+        piece_offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, Self::Error> {
         let mut file = File::open(&self.temp_file).await?;
         file.seek(SeekFrom::Start(
             self.piece_length * piece_index as u64 + piece_offset,
         ))
         .await?;
-        let mut buf = vec![0; self.piece_length as usize];
+        let mut buf = vec![0; length as usize];
         file.read_exact(&mut buf).await?;
         Ok(buf)
     }

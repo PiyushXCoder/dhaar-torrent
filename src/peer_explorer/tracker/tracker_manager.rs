@@ -54,6 +54,10 @@ impl PeerSource for TrackerManager {
             scheduler_heap.push(Reverse(tracker));
         }
 
+        if scheduler_heap.is_empty() {
+            warn!("No tracker URLs in the torrent, this source will find no peers");
+        }
+
         let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id);
         let join_handle = tokio::spawn(async move {
             announce_tracker(&mut scheduler_heap, &query, &peer_source_channel_sender).await;

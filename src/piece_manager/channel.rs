@@ -44,6 +44,12 @@ pub enum PieceManagerMessage {
     PieceLength {
         response_sender: OneShotSender<u64>,
     },
+    /// Length of one specific piece. Only the last piece differs from
+    /// `PieceLength`, and getting it wrong strands that piece.
+    PieceLengthAt {
+        piece_index: u32,
+        response_sender: OneShotSender<u64>,
+    },
     VerifyPiece {
         piece_index: u32,
         response_sender: OneShotSender<bool>,

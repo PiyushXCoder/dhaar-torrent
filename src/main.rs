@@ -37,8 +37,10 @@ async fn main() {
     let tracker_manager =
         TrackerManager::new(torrent.announce_urls(), &torrent.info_hash, &peer_id);
     let peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
+    let total_length = torrent.info.total_length();
     let piece_writer = DiskPieceWriter::new(
         torrent.info.piece_length,
+        total_length,
         &torrent.info.name,
         torrent.info.length,
         &torrent.info.md5sum,
@@ -47,6 +49,7 @@ async fn main() {
     let piece_manager = PieceManager::new(
         &torrent.info.pieces,
         torrent.info.piece_length,
+        total_length,
         piece_writer,
     );
     let retry_after_delay_peer_selection_strategy = RetryAfterDelayPeerSelectionStrategy::new();

@@ -16,6 +16,7 @@ where
     W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
     pub piece_length: u64,
+    pub total_length: u64,
     pub pieces: Vec<Piece>,
     // TODO: expose data from piece writer
     pub piece_writer: W,
@@ -57,7 +58,12 @@ where
     E: std::error::Error + Send + Sync + 'static,
     W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
-    pub fn new(piece_hashes: &ByteBuf, piece_length: u64, piece_writer: W) -> Self {
+    pub fn new(
+        piece_hashes: &ByteBuf,
+        piece_length: u64,
+        total_length: u64,
+        piece_writer: W,
+    ) -> Self {
         let piceces = piece_hashes
             .chunks(20)
             .map(|hash| Piece {
@@ -71,6 +77,7 @@ where
 
         Self {
             piece_length,
+            total_length,
             pieces: piceces,
             piece_writer,
         }
@@ -193,11 +200,26 @@ where
                 PieceManagerMessage::PieceLength { response_sender } => {
                     response_sender.send(self.piece_length).unwrap();
                 }
+                PieceManagerMessage::PieceLengthAt {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender.send(self.piece_size(piece_index)).unwrap();
+                }
                 PieceManagerMessage::ResetPiece { piece_index } => {
                     self.reset_piece(piece_index);
                 }
             }
         }
+    }
+
+    /// Bytes in `piece_index`. Every piece is `piece_length` except the last,
+    /// which is whatever is left over — treating it as full length makes its
+    /// hash, its block count and its block requests all wrong.
+    fn piece_size(&self, piece_index: u32) -> u64 {
+        let offset = piece_index as u64 * self.piece_length;
+        self.piece_length
+            .min(self.total_length.saturating_sub(offset))
     }
 
     fn has_piece(&self, piece_index: u32) -> bool {
@@ -239,7 +261,7 @@ where
     /// Claims `piece_index` for one peer. `None` means somebody else got it
     /// first, or it is already done.
     fn lock_piece(&mut self, piece_index: u32) -> Option<u32> {
-        let piece_length = self.piece_length;
+        let piece_length = self.piece_size(piece_index);
         let piece = self.pieces.get_mut(piece_index as usize)?;
         if piece.complete || piece.locked {
             return None;
@@ -251,7 +273,7 @@ where
 
     /// Claims one block inside an already locked piece.
     fn lock_block(&mut self, piece_index: u32, block_index: u32) -> bool {
-        let piece_length = self.piece_length;
+        let piece_length = self.piece_size(piece_index);
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return false;
         };
@@ -298,7 +320,8 @@ where
     }
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
-        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+        let piece_size = self.piece_size(piece_index);
+        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -313,7 +336,11 @@ where
         let Some(piece) = self.pieces.get(piece_index as usize) else {
             return false;
         };
-        let Ok(data) = self.piece_writer.read(piece_index, 0).await else {
+        let Ok(data) = self
+            .piece_writer
+            .read(piece_index, 0, self.piece_size(piece_index))
+            .await
+        else {
             return false;
         };
         let digest: [u8; 20] = sha1::Sha1::digest(&data).into();
