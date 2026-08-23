@@ -116,7 +116,7 @@ where
                     response_sender,
                 } => {
                     response_sender
-                        .send(self.get_next_interested_picecs(&bitfield))
+                        .send(self.get_next_interested_piece(&bitfield))
                         .unwrap();
                 }
                 PieceManagerMessage::LockPiece {
@@ -394,7 +394,7 @@ where
         }
     }
 
-    fn get_next_interested_picecs(&self, bitfield: &Bitfield) -> Option<u32> {
+    fn get_next_interested_piece(&self, bitfield: &Bitfield) -> Option<u32> {
         self.get_all_interested_pieces(bitfield).first().cloned()
     }
 }
