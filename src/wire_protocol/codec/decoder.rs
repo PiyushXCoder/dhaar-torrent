@@ -3,6 +3,7 @@ use super::{CodecState, WireCodec};
 use std::io;
 use tokio_util::bytes::{self, Buf};
 use tokio_util::codec::Decoder;
+use tracing::debug;
 
 impl Decoder for WireCodec {
     type Item = WireItem;
@@ -92,7 +93,7 @@ impl Decoder for WireCodec {
                 self.state = CodecState::Normal;
                 Ok(Some(WireItem::Handshake(handshake)))
             }
-            CodecState::Normal => {
+            CodecState::Normal => loop {
                 // Parse length‑prefixed messages (4‑byte length + payload).
                 // This is the same as in the earlier example.
                 if src.len() < 4 {
@@ -106,7 +107,7 @@ impl Decoder for WireCodec {
                 // Skip keep‑alive (length 0) – we just ignore it.
                 if msg_len == 0 {
                     src.advance(4);
-                    return self.decode(src); // continue scanning
+                    continue; // keep scanning
                 }
 
                 let payload = &src[4..4 + msg_len];
@@ -180,16 +181,18 @@ impl Decoder for WireCodec {
                         Message::Port(u16::from_be_bytes(rest[..2].try_into().unwrap()))
                     }
                     _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Unknown message id {}", id),
-                        ));
+                        // Unknown id, most likely an extension we never
+                        // advertised. Frames are length-prefixed, so skip this
+                        // one and keep the connection alive.
+                        debug!("skipping unknown message id {}", id);
+                        src.advance(4 + msg_len);
+                        continue;
                     }
                 };
 
                 src.advance(4 + msg_len);
-                Ok(Some(WireItem::Message(msg)))
-            }
+                return Ok(Some(WireItem::Message(msg)));
+            },
         }
     }
 }

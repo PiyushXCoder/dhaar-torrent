@@ -1,10 +1,11 @@
 use crate::{
-    peer_connection::PeerConnection,
+    peer_connection::{PeerConnection, error::PeerConnectionError},
     peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
     piece_manager::channel::PieceManagerChannelSender,
 };
 use channels::PeerManagerChannelMessage;
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 pub mod channels;
 pub mod peer_selection_strategy;
@@ -83,10 +84,15 @@ where
                             .await
                             {
                                 Ok(peer_connection) => peer_connection.start().await,
-                                Err(peer) => {
-                                    let _ = peer_manager_channel_sender
-                                        .send(PeerManagerChannelMessage::Closing(peer))
-                                        .await;
+                                Err(e) => {
+                                    warn!("{}", e);
+                                    // Only `ConnectFailed` hands the peer back; without it
+                                    // there is nothing to requeue.
+                                    if let PeerConnectionError::ConnectFailed { peer, .. } = e {
+                                        let _ = peer_manager_channel_sender
+                                            .send(PeerManagerChannelMessage::Closing(*peer))
+                                            .await;
+                                    }
                                 }
                             }
                         });

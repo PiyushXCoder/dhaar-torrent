@@ -6,7 +6,19 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-~40% complete. Bencode codec, torrent file parsing, and tracker announce done. Peer wire protocol (handshake + choke/unchoke/interested/have/bitfield/request/piece) implemented with a basic single-block-at-a-time download loop; pipelining, timeouts, and DHT still missing.
+~50% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to 8 outstanding requests per peer), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout.
+
+Still missing: keep-alive, resume across restarts, seeding, DHT, UDP trackers, and magnet links.
+
+### Architecture
+
+Components are independent tokio tasks talking over mpsc channels:
+
+- **`peer_explorer`** — owns peer sources (currently `TrackerManager` over HTTP) and streams discovered peers out
+- **`peer_manager`** — pulls peers through a selection strategy, caps concurrency at 50 connections, isolates per-peer failures
+- **`peer_connection`** — TCP connect, handshake, bitfield exchange, then hands the framed stream to `request_manager`
+- **`request_manager`** — per-peer state machine (choke/interest, piece locking, pipelined block requests, idle/request timeouts)
+- **`piece_manager`** — piece/bitfield bookkeeping, piece locking across peers, SHA-1 verification, writes via a `PieceWriter` trait (`DiskPieceWriter` is the disk impl)
 
 ### TODO
 
@@ -16,14 +28,18 @@ A torrent client written in Rust. Unserious. Built for fun.
 - [x] Torrent file parsing (single and multi-file structs, raw `info` capture via serde)
 - [x] Info hash computation (SHA-1 of bencoded `info` dict; hex and URL-safe forms)
 - [x] Chrono datetime support in bencode (unix timestamp serde)
-- [x] Logging/tracing — add `tracing` + `tracing-subscriber` with env-filter
+- [x] Logging/tracing — `tracing` + `tracing-subscriber` with env-filter
 - [x] Tracker announce — HTTP GET request, URL rotation, retry with backoff
 - [x] Tracker response — support binary model peers (6-byte entries)
-- [x] Peer wire protocol — TCP handshake, choke/unchoke, interested, have, bitfield, request/piece messages
-- [x] Piece manager — piece indices, bitfield tracking, sequential block download/upload (no pipelining yet)
-- [ ] Connection timeouts (connect/handshake/read) and periodic keep-alive
-- [ ] Request pipelining (multiple outstanding block requests per peer)
-- [ ] Disk I/O — writing verified pieces to disk done; resume support (recovering already-downloaded pieces on restart) pending
+- [x] Peer wire protocol — TCP handshake, choke/unchoke, interested, have, bitfield, request/piece/cancel/port messages
+- [x] Piece manager — piece indices, bitfield tracking, cross-peer piece locking, SHA-1 verification
+- [x] Request manager — per-peer connection state machine, pulled out of `peer_connection`
+- [x] Connection timeouts — handshake/bitfield timeouts, 60s idle timeout, 30s outstanding-request timeout
+- [x] Request pipelining — up to 8 outstanding block requests per peer
+- [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
+- [x] `lib.rs` for library API
+- [ ] Periodic keep-alive messages
+- [ ] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
 - [ ] `Download` wrapper struct — pull the wiring out of `main.rs` (currently cluttered)
 - [ ] Status/progress events — download internals report events back to `main` instead of being silent
 - [ ] CLI progress bar driven by those events
@@ -32,7 +48,6 @@ A torrent client written in Rust. Unserious. Built for fun.
 - [ ] Magnet links (BEP 9/10) — metadata exchange
 - [ ] Upload/seeding
 - [ ] Rate limiting
-- [ ] `lib.rs` for library API
 - [ ] `models/` module — shared domain types
 
 ## Usage
@@ -54,9 +69,17 @@ dhaar-torrent ubuntu.torrent
 dhaar-torrent ubuntu.torrent --config-file ./my-config.toml
 ```
 
+Downloads land in the current working directory. While in flight the data lives in a single `<name>.dhaar` file; once every piece verifies, it is split into the torrent's real file layout.
+
+Set `RUST_LOG` to control log output:
+
+```sh
+RUST_LOG=dhaar_torrent=debug dhaar-torrent ubuntu.torrent
+```
+
 ## Config
 
-Config file lives at `~/.config/dhaar-torrent/config.toml` by default. TOML format.
+Config file lives at `~/.config/dhaar-torrent/config.toml` by default. TOML format. Nothing configurable there yet — every knob is still a CLI flag.
 
 ## Build
 
@@ -64,7 +87,7 @@ Config file lives at `~/.config/dhaar-torrent/config.toml` by default. TOML form
 cargo build --release
 ```
 
-Requires Rust (stable).
+Requires Rust (stable, edition 2024).
 
 ## License
 
