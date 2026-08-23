@@ -44,6 +44,7 @@ Components are independent tokio tasks talking over mpsc channels:
 - [x] Request pipelining — up to 8 outstanding block requests per peer
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
+- [ ] Endgame mode — once only a few blocks remain, request them from every peer at once and `Cancel` the losers, so one slow peer can no longer hold the tail for a full 30s request timeout
 - [ ] Periodic keep-alive messages
 - [ ] Completion state — stop dialing peers once every piece is verified
 - [ ] Inbound connections — TCP listener (`PeerConnection::from_stream` exists, nothing calls it)
