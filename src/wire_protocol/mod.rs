@@ -13,6 +13,9 @@ pub struct Handshake {
 
 #[derive(Debug)]
 pub enum Message {
+    /// A bare zero-length frame. Carries nothing but "still here", which is
+    /// all a peer needs to keep its idle timer from firing.
+    KeepAlive,
     Choke,
     Unchoke,
     Interested,

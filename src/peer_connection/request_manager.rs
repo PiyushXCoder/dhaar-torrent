@@ -22,7 +22,13 @@ use tokio::{
 use tracing::{debug, warn};
 
 /// Any traffic at all resets this. Purely a liveness check.
-const IDLE_TIMEOUT: time::Duration = time::Duration::from_secs(60);
+///
+/// Longer than the two minutes peers conventionally leave between keep-alives,
+/// or a peer with nothing to say would be dropped while behaving correctly.
+const IDLE_TIMEOUT: time::Duration = time::Duration::from_secs(150);
+/// How long this connection may stay silent before saying something. Under the
+/// two minutes peers conventionally wait, so we speak first.
+const KEEP_ALIVE_INTERVAL: time::Duration = time::Duration::from_secs(100);
 /// Only block data resets this, so a peer that chats but never delivers
 /// stops holding our blocks hostage.
 const REQUEST_TIMEOUT: time::Duration = time::Duration::from_secs(30);
@@ -137,6 +143,9 @@ pub struct RequestManager {
     /// disagree about what we hold.
     piece_events: PieceEventReceiver,
     stats: Arc<DownloadStats>,
+    /// When this connection last sent anything at all. Keep-alives are only
+    /// worth sending into silence, so this is what the timer measures from.
+    last_sent: time::Instant,
 }
 
 impl RequestManager {
@@ -171,6 +180,7 @@ impl RequestManager {
             outgoing_channel_sender,
             piece_events,
             stats,
+            last_sent: time::Instant::now(),
         }
     }
 
@@ -217,6 +227,12 @@ impl RequestManager {
                 },
                 _ = availability_tick.tick() => {
                     self.availability_tick().await?;
+                },
+                // Re-armed from `last_sent` on every pass, so real traffic
+                // keeps pushing it back and it only fires into silence.
+                _ = time::sleep_until(self.last_sent + KEEP_ALIVE_INTERVAL) => {
+                    debug!("{}: keep-alive", peer_addr(&self.peer));
+                    self.send_message(Message::KeepAlive).await?;
                 },
                 event = self.piece_events.recv() => {
                     match event {
@@ -340,6 +356,9 @@ impl RequestManager {
                     length
                 );
             }
+            // Nothing to do beyond having arrived: reaching here has already
+            // pushed back the idle deadline, which is the whole point of it.
+            WireItem::Message(Message::KeepAlive) => {}
             // DHT is not implemented, so the peer's DHT port is of no use.
             WireItem::Message(Message::Port(_port)) => {}
             _ => {}
@@ -705,11 +724,15 @@ impl RequestManager {
         self.fill_pipeline().await
     }
 
-    async fn send_message(&self, message: Message) -> PeerConnectionResult<()> {
+    async fn send_message(&mut self, message: Message) -> PeerConnectionResult<()> {
         self.outgoing_channel_sender
             .send(WireItem::Message(message))
             .await
-            .map_err(|_| PeerConnectionError::PeerDisconnected)
+            .map_err(|_| PeerConnectionError::PeerDisconnected)?;
+        // Every send pushes the keep-alive out, so one is only ever written
+        // when this connection would otherwise have gone quiet.
+        self.last_sent = time::Instant::now();
+        Ok(())
     }
 
     async fn ask<T>(

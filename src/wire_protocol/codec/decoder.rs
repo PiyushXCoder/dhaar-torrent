@@ -104,10 +104,12 @@ impl Decoder for WireCodec {
                     return Ok(None);
                 }
 
-                // Skip keep‑alive (length 0) – we just ignore it.
+                // Keep-alive: no id, no payload. It is passed on rather than
+                // swallowed, because the idle timeout upstream is counting
+                // silence and this is the one message that breaks it.
                 if msg_len == 0 {
                     src.advance(4);
-                    continue; // keep scanning
+                    return Ok(Some(WireItem::Message(Message::KeepAlive)));
                 }
 
                 let payload = &src[4..4 + msg_len];
