@@ -20,6 +20,10 @@ where
     pub pieces: Vec<Piece>,
     // TODO: expose data from piece writer
     pub piece_writer: W,
+    /// Fan-out of everything that completes. Connections subscribe to it so
+    /// they can cancel work another peer already did and announce what we
+    /// hold; nothing here waits on a subscriber.
+    piece_events: channel::PieceEventSender,
 }
 
 pub struct Piece {
@@ -99,6 +103,7 @@ where
             total_length,
             pieces: piceces,
             piece_writer,
+            piece_events: channel::new_piece_event_channel(),
         }
     }
 
@@ -166,6 +171,9 @@ where
                 }
                 PieceManagerMessage::TotalPieces { response_sender } => {
                     response_sender.send(self.total_pieces()).unwrap();
+                }
+                PieceManagerMessage::Subscribe { response_sender } => {
+                    response_sender.send(self.piece_events.subscribe()).unwrap();
                 }
             }
         }
@@ -439,6 +447,12 @@ where
         {
             block.complete = true;
             block.requesters.retain(|p| *p != peer);
+            // Nobody may be listening yet, and a full buffer only costs a
+            // duplicate block, so a refused send is not worth reporting.
+            let _ = self.piece_events.send(channel::PieceEvent::BlockComplete {
+                piece_index,
+                block_index,
+            });
         }
         if piece
             .blocks
@@ -460,6 +474,9 @@ where
             }
             debug!("{}: piece complete, hash verified", piece_index);
             piece.complete = true;
+            let _ = self
+                .piece_events
+                .send(channel::PieceEvent::PieceComplete { piece_index });
         }
     }
 

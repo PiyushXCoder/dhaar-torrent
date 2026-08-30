@@ -6,12 +6,16 @@ use crate::{
     peer_manager::channels::PeerManagerChannelSender,
     piece_manager::{
         BLOCK_SIZE,
-        channel::{PieceManagerChannelSender, PieceManagerMessage},
+        channel::{PieceEvent, PieceManagerChannelSender, PieceManagerMessage},
     },
     wire_protocol::{Bitfield, Message, WireItem},
 };
 
-use tokio::{select, sync::oneshot, time};
+use tokio::{
+    select,
+    sync::{broadcast, oneshot},
+    time,
+};
 use tracing::{debug, warn};
 
 /// Any traffic at all resets this. Purely a liveness check.
@@ -180,6 +184,12 @@ impl RequestManager {
         let mut request_deadline: Option<time::Instant> = None;
         let mut availability_tick = time::interval(AVAILABILITY_TICK);
 
+        // Subscribed to before anything else is done, so no completion that
+        // happens while this connection is starting up goes unnoticed.
+        let mut piece_events = self
+            .ask(|response_sender| PieceManagerMessage::Subscribe { response_sender })
+            .await?;
+
         debug!("{}: request loop started", peer_addr(&self.peer));
         self.update_interest().await?;
 
@@ -202,6 +212,25 @@ impl RequestManager {
                 },
                 _ = availability_tick.tick() => {
                     self.availability_tick().await?;
+                },
+                event = piece_events.recv() => {
+                    match event {
+                        Ok(event) => self.handle_piece_event(event).await?,
+                        // Falling behind costs a duplicate block or an
+                        // unannounced piece, never correctness, so carry on.
+                        Err(broadcast::error::RecvError::Lagged(missed)) => {
+                            warn!(
+                                "{}: missed {} piece event(s)",
+                                peer_addr(&self.peer),
+                                missed
+                            );
+                        }
+                        // The piece manager is gone, so there is nothing left
+                        // to download and nothing to serve from.
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(PeerConnectionError::PeerDisconnected);
+                        }
+                    }
                 },
                 item = self.incoming_channel_receiver.recv() => {
                     let Some(item) = item else {
@@ -288,12 +317,75 @@ impl RequestManager {
             }) => {
                 self.receive_block(index, begin, block).await?;
             }
-            // Requests are answered inline as they arrive, so by the time a
-            // cancel lands there is no queued upload left to drop.
-            WireItem::Message(Message::Cancel { .. }) => {}
+            // Requests are answered inline as they arrive: `serve_block` runs
+            // to completion before the next message is read, so by the time a
+            // cancel is seen its block has already gone out. There is no
+            // upload queue to drop it from, only the record that the peer
+            // stopped wanting it.
+            WireItem::Message(Message::Cancel {
+                index,
+                begin,
+                length,
+            }) => {
+                debug!(
+                    "{}: cancelled its request for piece {} at {} ({} bytes), already served",
+                    peer_addr(&self.peer),
+                    index,
+                    begin,
+                    length
+                );
+            }
             // DHT is not implemented, so the peer's DHT port is of no use.
             WireItem::Message(Message::Port(_port)) => {}
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Reacts to work finished elsewhere. Our own deliveries come back
+    /// through here too, but they have already left `active_blocks` by then,
+    /// so they fall through as no-ops.
+    async fn handle_piece_event(&mut self, event: PieceEvent) -> PeerConnectionResult<()> {
+        match event {
+            PieceEvent::BlockComplete {
+                piece_index,
+                block_index,
+            } => {
+                if self.held_piece() != Some(piece_index) {
+                    return Ok(());
+                }
+                let Some(position) = self
+                    .active_blocks
+                    .iter()
+                    .position(|active| *active == block_index)
+                else {
+                    return Ok(());
+                };
+                // Endgame had us racing another peer for this block and we
+                // lost. Stop the transfer rather than pay for a copy of data
+                // that is already on disk.
+                self.active_blocks.swap_remove(position);
+                let (begin, length) = self.block_bounds(block_index);
+                self.send_message(Message::Cancel {
+                    index: piece_index,
+                    begin,
+                    length,
+                })
+                .await?;
+                debug!(
+                    "{}: cancelled block {} of piece {}, another peer delivered it",
+                    peer_addr(&self.peer),
+                    block_index,
+                    piece_index
+                );
+                // A slot just came free.
+                self.fill_pipeline().await?;
+            }
+            PieceEvent::PieceComplete { piece_index } => {
+                self.send_message(Message::Have(piece_index)).await?;
+                // Finishing a piece can be what makes this peer uninteresting.
+                self.update_interest().await?;
+            }
         }
         Ok(())
     }

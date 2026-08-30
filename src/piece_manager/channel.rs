@@ -1,4 +1,5 @@
 use tokio::sync::{
+    broadcast,
     mpsc::{Receiver, Sender, channel},
     oneshot::Sender as OneShotSender,
 };
@@ -6,6 +7,10 @@ use tokio::sync::{
 use crate::{peer_explorer::Peer, wire_protocol::Bitfield};
 
 const CHANNEL_SIZE: usize = 256;
+/// Deep enough that a connection busy with a slow write does not miss events
+/// it could still act on. Overflowing only costs a duplicate block or an
+/// unannounced piece, never correctness.
+const EVENT_CHANNEL_SIZE: usize = 512;
 
 pub enum PieceManagerMessage {
     HasPiece {
@@ -55,6 +60,30 @@ pub enum PieceManagerMessage {
     TotalPieces {
         response_sender: OneShotSender<u32>,
     },
+    /// Asks for a feed of `PieceEvent`s. Connections subscribe for themselves
+    /// rather than being handed a receiver at construction, which keeps the
+    /// feed out of every signature between here and `main`.
+    Subscribe {
+        response_sender: OneShotSender<broadcast::Receiver<PieceEvent>>,
+    },
+}
+
+/// Something finished. The piece manager is the only writer; connections
+/// listen so they can react to work done by peers other than their own.
+#[derive(Clone, Copy, Debug)]
+pub enum PieceEvent {
+    /// A block landed. Anyone else with it in flight is now downloading a
+    /// copy nobody needs and should cancel it.
+    BlockComplete { piece_index: u32, block_index: u32 },
+    /// A piece passed its hash check, so every peer can be told we have it.
+    PieceComplete { piece_index: u32 },
+}
+
+pub type PieceEventSender = broadcast::Sender<PieceEvent>;
+pub type PieceEventReceiver = broadcast::Receiver<PieceEvent>;
+
+pub fn new_piece_event_channel() -> PieceEventSender {
+    broadcast::channel(EVENT_CHANNEL_SIZE).0
 }
 
 /// Answer to `ClaimBlocks`.
