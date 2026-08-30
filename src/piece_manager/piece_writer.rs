@@ -139,6 +139,8 @@ impl PieceWriter for DiskPieceWriter {
             }
         }
 
+        tokio::fs::remove_file(&self.temp_file).await?;
+
         Ok(())
     }
 }

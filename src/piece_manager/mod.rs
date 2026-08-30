@@ -486,6 +486,10 @@ where
             let _ = self
                 .piece_events
                 .send(channel::PieceEvent::PieceComplete { piece_index });
+
+            if self.is_completed() {
+                self.piece_writer.finalize().await.unwrap();
+            }
         }
     }
 
