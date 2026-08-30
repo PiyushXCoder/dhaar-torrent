@@ -1,9 +1,12 @@
+use crate::status::DownloadStats;
 use crate::{
     peer_connection::{PeerConnection, error::PeerConnectionError},
     peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
-    piece_manager::channel::PieceManagerChannelSender,
+    piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
 };
 use channels::PeerManagerChannelMessage;
+use std::sync::Arc;
+use tokio::sync::oneshot;
 use tracing::warn;
 
 pub mod channels;
@@ -18,21 +21,51 @@ where
     peer_slection_strategy: S,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
-    /// Peer connections currently in flight, capped at `MAX_PEERS`.
-    active: usize,
+    /// Peer connections currently in flight, capped at `MAX_PEERS`. Kept in
+    /// the shared counters rather than a field of its own, so a caller asking
+    /// for status sees the same number this loop makes decisions on.
+    stats: Arc<DownloadStats>,
+    download_completed: bool,
 }
 
 impl<S> PeerManager<S>
 where
     S: peer_selection_strategy::PeerSelectionStrategy + Sync + Send + 'static,
 {
-    pub fn new(peer_slection_strategy: S, info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
+    pub fn new(
+        peer_slection_strategy: S,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
+    ) -> Self {
         Self {
             peer_slection_strategy,
             info_hash: *info_hash,
             peer_id: *peer_id,
-            active: 0,
+            stats,
+            download_completed: false,
         }
+    }
+
+    /// Whether there is anything left to download, cached once true. The
+    /// answer only ever goes from false to true, so the piece manager is asked
+    /// until it says yes and never again.
+    async fn is_download_completed(&mut self, sender: &PieceManagerChannelSender) -> bool {
+        if self.download_completed {
+            return true;
+        }
+        let (response_sender, response) = oneshot::channel();
+        // A piece manager that has gone away leaves nothing to download for.
+        if sender
+            .send(PieceManagerMessage::IsCompleted { response_sender })
+            .await
+            .is_err()
+        {
+            self.download_completed = true;
+            return true;
+        }
+        self.download_completed = response.await.unwrap_or(true);
+        self.download_completed
     }
 
     pub async fn start(
@@ -48,7 +81,7 @@ where
                 msg = peer_manager_channel_receiver.recv() => {
                     match msg {
                         Some(PeerManagerChannelMessage::Closing(peer)) => {
-                            self.active -= 1;
+                            self.stats.peer_disconnected();
                             self.peer_slection_strategy.push(peer, true);
                         }
                         None => break,
@@ -62,14 +95,25 @@ where
                     }
                 }
                 Some(attempt) = self.peer_slection_strategy.pop(),
-                    if self.active < MAX_PEERS && self.peer_slection_strategy.peek().is_some() =>
+                    if !self.download_completed
+                        && self.stats.active_peers() < MAX_PEERS
+                        && self.peer_slection_strategy.peek().is_some() =>
                 {
-                    self.active += 1;
+                    // The flag can be stale by a few pieces, so confirm before
+                    // dialling: a peer connected now would hand back its piece
+                    // and close without transferring anything.
+                    if self.is_download_completed(&piece_manager_channel_sender).await {
+                        continue;
+                    }
 
+                    self.stats.peer_connected();
+
+                    let stats = self.stats.clone();
                     let peer_manager_channel_sender = peer_manager_channel_sender.clone();
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
+
 
                     tokio::spawn(async move {
                         let connection_sender = peer_manager_channel_sender.clone();
@@ -79,6 +123,7 @@ where
                             piece_manager_channel_sender,
                             &info_hash,
                             &peer_id,
+                            stats,
                         )
                         .await
                         {

@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
 
+use std::sync::Arc;
+
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
     peer_manager::channels::{PeerManagerChannelMessage, PeerManagerChannelSender},
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
+    status::DownloadStats,
     wire_protocol::{Bitfield, Handshake, Message, WireCodec, WireItem},
 };
 
@@ -18,6 +21,7 @@ pub mod error;
 pub mod request_manager;
 
 pub struct PeerConnection {
+    pub stats: Arc<DownloadStats>,
     pub peer: Option<Peer>,
     pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
@@ -36,15 +40,17 @@ impl PeerConnection {
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
     ) -> PeerConnectionResult<Self> {
         let stream = TcpStream::connect(peer.address).await.map_err(|source| {
             PeerConnectionError::ConnectFailed {
-                peer: Box::new(peer.clone()),
+                peer: Box::new(peer),
                 source,
             }
         })?;
 
         Ok(PeerConnection {
+            stats,
             peer: Some(peer),
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
@@ -60,8 +66,10 @@ impl PeerConnection {
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
     ) -> Self {
         PeerConnection {
+            stats,
             peer: None,
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
@@ -86,23 +94,19 @@ impl PeerConnection {
     async fn run(&mut self) -> PeerConnectionResult<()> {
         let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
         self.handshake(&mut framed).await?;
-        let our_bitfield = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
-            PieceManagerMessage::Bitfield {
+        // The subscription comes back with the bitfield rather than being
+        // taken later: anything completing in between would be missing from
+        // both, and the peer would never hear about it.
+        let snapshot = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
+            PieceManagerMessage::GetBitfield {
                 response_sender: tx,
             }
         })
         .await?;
 
         framed
-            .send(WireItem::Message(Message::Bitfield(our_bitfield)))
+            .send(WireItem::Message(Message::Bitfield(snapshot.bitfield)))
             .await?;
-
-        let piece_length = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
-            PieceManagerMessage::PieceLength {
-                response_sender: tx,
-            }
-        })
-        .await?;
 
         let peer_bitfield: Bitfield;
         select! {
@@ -161,11 +165,12 @@ impl PeerConnection {
             self.info_hash,
             self.peer_id,
             peer_bitfield,
-            piece_length,
             self.peer_manager_channel_sender.clone(),
             self.piece_manager_channel_sender.clone(),
             incoming_receiver,
             outgoing_sender,
+            snapshot.events,
+            self.stats.clone(),
         );
 
         joinset.spawn(async move {
