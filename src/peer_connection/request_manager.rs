@@ -24,6 +24,92 @@ const REQUEST_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 const AVAILABILITY_TICK: time::Duration = time::Duration::from_secs(5);
 const MAX_REQUESTS: u32 = 8;
 
+/// A claimed piece, held for as long as this connection is working it.
+///
+/// Releasing is not something a connection can be trusted to do on its way
+/// out: a panic unwinds past every line of teardown, and a task dropped at an
+/// await point never reaches them at all. Either way the piece manager would
+/// go on believing the piece is spoken for, and since only an unheld piece can
+/// be claimed, nobody could ever pick it up again. Tying the release to the
+/// value's lifetime covers the paths that `start` cannot.
+struct PieceHold {
+    piece_index: u32,
+    peer: Peer,
+    /// Set once the piece is known to be back with the manager, so `drop`
+    /// stays quiet.
+    released: bool,
+    piece_manager_channel_sender: PieceManagerChannelSender,
+}
+
+impl PieceHold {
+    fn new(
+        piece_index: u32,
+        peer: Peer,
+        piece_manager_channel_sender: PieceManagerChannelSender,
+    ) -> Self {
+        Self {
+            piece_index,
+            peer,
+            released: false,
+            piece_manager_channel_sender,
+        }
+    }
+
+    /// Hands the piece back and disarms the guard. This is the ordinary path:
+    /// it can wait for room in the queue, which `drop` cannot.
+    async fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Err(e) = self
+            .piece_manager_channel_sender
+            .send(PieceManagerMessage::Release {
+                piece_index: self.piece_index,
+                peer: self.peer,
+            })
+            .await
+        {
+            debug!("piece manager unreachable while releasing: {}", e);
+        }
+    }
+
+    /// Marks the piece as already back with the manager — it took it back
+    /// itself as part of handing out the next one.
+    fn disarm(&mut self) {
+        self.released = true;
+    }
+}
+
+impl Drop for PieceHold {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // `drop` cannot await, so this is the one send that has to be
+        // non-blocking. The queue is deep and this message is small, so a
+        // refusal means the manager is gone or badly backed up; nothing
+        // further can be done from here, but the piece must not go quietly.
+        if let Err(e) = self
+            .piece_manager_channel_sender
+            .try_send(PieceManagerMessage::Release {
+                piece_index: self.piece_index,
+                peer: self.peer,
+            })
+        {
+            warn!(
+                "{}: piece {} stranded, release could not be sent: {}",
+                self.peer.address, self.piece_index, e
+            );
+            return;
+        }
+        warn!(
+            "{}: piece {} released without teardown",
+            self.peer.address, self.piece_index
+        );
+    }
+}
+
 pub struct RequestManager {
     pub peer: Option<Peer>,
     pub info_hash: [u8; 20],
@@ -33,7 +119,7 @@ pub struct RequestManager {
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub peer_bitfield: Bitfield,
-    pub active_piece: Option<u32>,
+    active_piece: Option<PieceHold>,
     pub active_piece_length: u64,
     pub active_blocks: Vec<u32>,
     pub is_end_game_active: bool,
@@ -75,6 +161,11 @@ impl RequestManager {
         }
     }
 
+    /// Index of the piece this connection currently holds.
+    fn held_piece(&self) -> Option<u32> {
+        self.active_piece.as_ref().map(|hold| hold.piece_index)
+    }
+
     pub async fn start(mut self) {
         match self.run().await {
             Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
@@ -82,6 +173,7 @@ impl RequestManager {
             }
             Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
         }
+        self.release_active_piece().await;
         close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
     }
 
@@ -90,6 +182,7 @@ impl RequestManager {
         let mut request_deadline: Option<time::Instant> = None;
         let mut availability_tick = time::interval(AVAILABILITY_TICK);
 
+        debug!("{}: request loop started", peer_addr(&self.peer));
         self.update_interest().await?;
 
         loop {
@@ -106,6 +199,7 @@ impl RequestManager {
                     }
                 } => {
                     warn!("{}: requests timed out", peer_addr(&self.peer));
+                    self.release_active_piece().await;
                     request_deadline = None;
                 },
                 _ = availability_tick.tick() => {
@@ -134,23 +228,33 @@ impl RequestManager {
     async fn handle_incoming_message(&mut self, item: WireItem) -> PeerConnectionResult<()> {
         match item {
             WireItem::Message(Message::Choke) => {
+                debug!(
+                    "{}: choked us, {} request(s) dropped",
+                    peer_addr(&self.peer),
+                    self.active_blocks.len()
+                );
                 self.peer_choking = true;
                 // The peer throws away every request it has not answered, so
                 // holding those block locks would strand them.
+                self.release_active_piece().await;
             }
             WireItem::Message(Message::Unchoke) => {
+                debug!("{}: unchoked us", peer_addr(&self.peer));
                 self.peer_choking = false;
                 self.fill_pipeline().await?;
             }
             WireItem::Message(Message::Interested) => {
+                debug!("{}: interested in us", peer_addr(&self.peer));
                 self.peer_interested = true;
                 // There is no upload policy yet, so whoever asks gets served.
                 if self.am_choking {
+                    debug!("{}: unchoking", peer_addr(&self.peer));
                     self.am_choking = false;
                     self.send_message(Message::Unchoke).await?;
                 }
             }
             WireItem::Message(Message::NotInterested) => {
+                debug!("{}: no longer interested in us", peer_addr(&self.peer));
                 self.peer_interested = false;
             }
             WireItem::Message(Message::Have(index)) => {
@@ -220,6 +324,15 @@ impl RequestManager {
             return Ok(());
         }
         self.am_interested = interested;
+        debug!(
+            "{}: we are now {}",
+            peer_addr(&self.peer),
+            if interested {
+                "interested"
+            } else {
+                "not interested"
+            }
+        );
         self.send_message(if interested {
             Message::Interested
         } else {
@@ -231,90 +344,111 @@ impl RequestManager {
     /// Keeps up to `MAX_REQUESTS` blocks in flight, all inside one piece.
     /// Working a single piece at a time means a dead connection strands at
     /// most one partial piece.
+    ///
+    /// The piece manager both chooses the piece and registers us against its
+    /// blocks in one message: asking what is free and then claiming it would
+    /// let a second peer take the same piece in between.
     async fn fill_pipeline(&mut self) -> PeerConnectionResult<()> {
         if self.peer_choking || !self.am_interested {
             return Ok(());
         }
-        if self.active_piece.is_none() {
-            self.acquire_piece().await?;
-        }
-        let Some(piece_index) = self.active_piece else {
+        let Some(capacity) = MAX_REQUESTS.checked_sub(self.active_blocks.len() as u32) else {
             return Ok(());
         };
+        if capacity == 0 {
+            return Ok(());
+        }
 
-        let candidates = self
-            .ask(|response_sender| PieceManagerMessage::GetIncompleteBlocks {
+        let bitfield = self.peer_bitfield.clone();
+        let peer = self.peer.unwrap();
+        let piece_index = self.held_piece();
+        let reply = self
+            .ask(|response_sender| PieceManagerMessage::ClaimBlocks {
                 piece_index,
+                bitfield,
+                peer,
+                max_blocks: capacity,
                 response_sender,
             })
             .await?;
 
-        let peer = self.peer.unwrap();
-        for block in candidates {
-            if self.active_blocks.len() >= MAX_REQUESTS as usize {
-                break;
-            }
-            if self.is_end_game_active {
-                // TODO: endgame
-            } else {
-                if block.requesters_len > 1 {
-                    continue;
+        // A spent piece is taken back by the manager in the same turn it picks
+        // the replacement. Mirror what it reports instead of inferring it: if
+        // it ever stops taking pieces back, we keep holding this one and hand
+        // it over at teardown, rather than stranding it forever.
+        if let Some(released) = reply.released {
+            debug!(
+                "{}: piece {} is spent, taken back",
+                peer_addr(&self.peer),
+                released
+            );
+            if self.held_piece() == Some(released) {
+                // Already back with the manager, so there is nothing left for
+                // the guard to hand over.
+                if let Some(hold) = self.active_piece.as_mut() {
+                    hold.disarm();
                 }
+                self.active_piece = None;
             }
+        }
 
-            self.ask(|_| PieceManagerMessage::RegisterRequesting {
-                piece_index,
-                block_index: block.index,
+        let Some(claim) = reply.granted else {
+            return Ok(());
+        };
+
+        if self.held_piece() != Some(claim.piece_index) {
+            debug!(
+                "{}: claimed piece {} ({} bytes)",
+                peer_addr(&self.peer),
+                claim.piece_index,
+                claim.piece_length
+            );
+            self.active_piece = Some(PieceHold::new(
+                claim.piece_index,
                 peer,
-            })
-            .await?;
+                self.piece_manager_channel_sender.clone(),
+            ));
+        }
+        self.active_piece_length = claim.piece_length;
 
-            let (begin, length) = self.block_bounds(block.index);
+        for block_index in claim.blocks.iter().copied() {
+            let (begin, length) = self.block_bounds(block_index);
             self.send_message(Message::Request {
-                index: piece_index,
+                index: claim.piece_index,
                 begin,
                 length,
             })
             .await?;
-            self.active_blocks.push(block.index);
+            self.active_blocks.push(block_index);
+        }
+        if !claim.blocks.is_empty() {
+            debug!(
+                "{}: requested {} block(s) of piece {}, {} in flight",
+                peer_addr(&self.peer),
+                claim.blocks.len(),
+                claim.piece_index,
+                self.active_blocks.len()
+            );
         }
         Ok(())
     }
 
-    /// Claims the first piece this peer can serve that nobody else holds.
-    /// The interested list can be stale, so `LockPiece` is what decides.
-    async fn acquire_piece(&mut self) -> PeerConnectionResult<()> {
-        let bitfield = self.peer_bitfield.clone();
-        let candidates = self
-            .ask(|response_sender| PieceManagerMessage::GetIncompletePieces {
-                bitfield,
-                response_sender,
-            })
-            .await?;
-
-        let mut piece_index: u32 = 0;
-        for piece in candidates {
-            if self.is_end_game_active {
-                // TODO: endgame
-            } else {
-                if piece.requesters_len == 0 {
-                    piece_index = piece.index;
-                    break;
-                }
-            }
-            if piece_index == 0 {
-                return Err(PeerConnectionError::PeerDisconnected);
-            }
-        }
-
-        self.active_piece = Some(piece_index);
-        self.active_piece_length = self
-            .ask(|response_sender| PieceManagerMessage::PieceLength {
-                piece_index,
-                response_sender,
-            })
-            .await?;
-        Ok(())
+    /// Hands the active piece back to the piece manager. Every path that
+    /// abandons requests has to go through here: registrations are otherwise
+    /// only cleared by data arriving, and requests we walk away from would
+    /// keep the piece locked for the rest of the session.
+    async fn release_active_piece(&mut self) {
+        let Some(mut hold) = self.active_piece.take() else {
+            return;
+        };
+        debug!(
+            "{}: releasing piece {} with {} request(s) outstanding",
+            peer_addr(&self.peer),
+            hold.piece_index,
+            self.active_blocks.len()
+        );
+        self.active_blocks.clear();
+        hold.release().await;
     }
 
     /// Byte range of one block inside the active piece. The final block of a
@@ -334,7 +468,7 @@ impl RequestManager {
         begin: u32,
         block: Vec<u8>,
     ) -> PeerConnectionResult<()> {
-        let Some(piece_index) = self.active_piece else {
+        let Some(piece_index) = self.held_piece() else {
             debug!(
                 "{}: block for piece {} while working on nothing",
                 peer_addr(&self.peer),
@@ -377,9 +511,8 @@ impl RequestManager {
         })
         .await;
 
-        if self.active_blocks.is_empty() {
-            self.active_piece = None;
-        }
+        // The piece stays ours until the manager says it is spent; topping it
+        // up is `fill_pipeline`'s job.
         self.fill_pipeline().await
     }
 
@@ -412,6 +545,11 @@ impl RequestManager {
             })
             .await?;
         if !has_piece {
+            debug!(
+                "{}: asked for piece {}, which we do not have",
+                peer_addr(&self.peer),
+                index
+            );
             return Ok(());
         }
         let block_index = (begin as u64 / BLOCK_SIZE) as u32;
@@ -423,9 +561,22 @@ impl RequestManager {
             })
             .await?;
         if block.is_empty() {
+            debug!(
+                "{}: storage returned nothing for piece {} block {}",
+                peer_addr(&self.peer),
+                index,
+                block_index
+            );
             return Ok(());
         }
         block.truncate(length as usize);
+        debug!(
+            "{}: serving block {} of piece {} ({} bytes)",
+            peer_addr(&self.peer),
+            block_index,
+            index,
+            length
+        );
         self.send_message(Message::Piece {
             index,
             begin,
