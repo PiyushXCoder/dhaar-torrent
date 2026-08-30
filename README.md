@@ -14,13 +14,15 @@ The tail of a download no longer stalls behind one slow peer: once every remaini
 
 The whole thing is a library. `Download` owns the wiring, hands back a handle, and reports live status — bytes, rates, peers, pieces in flight, wasted bytes, hash failures — which is what the GUI above is rendering.
 
-Still missing: keep-alive, resume across restarts, seeding, inbound connections, web seeds, DHT, UDP trackers, and magnet links.
+Connections keep themselves alive: a keep-alive goes out after 100s of silence, and one arriving resets the idle timer, which is why that timer is 150s — longer than the two minutes peers conventionally leave between keep-alives, so a peer with nothing to say is no longer dropped for saying nothing.
+
+Still missing: resume across restarts, seeding, inbound connections, web seeds, DHT, UDP trackers, and magnet links.
 
 ### Known rough edges
 
 - **Trackers are the only peer source.** `announce` is optional and `announce-list` alone is enough, but a torrent that ships neither — Arch Linux's ISO torrent, for example, which carries only a BEP 19 `url-list` of web seeds — parses fine and then finds no peers at all. It logs a warning and sits idle.
 - **Outbound only.** There is no TCP listener, so no peer can ever connect to us. Blocks are served to peers we dialled, but once a download completes the peer manager stops dialling, so in practice nothing is ever seeded.
-- **A connection that panics leaks its slot.** Teardown is skipped on unwind and nothing observes the dropped `JoinHandle`, so the peer manager's connection count never comes back down. The piece itself is safe — a guard hands it back when dropped.
+- **Finishing a download ends any chance of seeding it.** `finalize` splits the `.dhaar` file into the real layout and deletes it, but every read still goes through that file, so a peer asking for a block we hold gets nothing. Confirmed against a live swarm.
 - **Nothing survives a restart.** A partial `.dhaar` file is not read back, so an interrupted download starts from zero.
 
 ### Architecture
@@ -29,7 +31,7 @@ Components are independent tokio tasks talking over mpsc channels:
 
 - **`Download`** — assembles every actor and their channels, spawns them, and hands back a `DownloadHandle` for status and shutdown
 - **`peer_explorer`** — owns peer sources (currently `TrackerManager` over HTTP) and streams discovered peers out
-- **`peer_manager`** — pulls peers through a selection strategy, caps concurrency at 50 connections, isolates per-peer failures, stops dialling once every piece is verified
+- **`peer_manager`** — pulls peers through a selection strategy, caps concurrency at 50 connections, stops dialling once every piece is verified, and supervises the connection tasks directly: a task that panics or is dropped reports nothing, so its ending is observed rather than announced
 - **`peer_connection`** — TCP connect, handshake, bitfield exchange, then hands the framed stream to `request_manager`
 - **`request_manager`** — per-peer state machine (choke/interest, pipelined block requests, idle/request timeouts, cancels and `Have` announcements)
 - **`piece_manager`** — the sole arbiter of who downloads what: it picks a peer's piece, registers its blocks and reports back in a single message, so two peers cannot claim the same work in the gap between asking and taking. Also SHA-1 verification and writes via a `PieceWriter` trait (`DiskPieceWriter` is the disk impl)
@@ -61,18 +63,21 @@ Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/
 - [x] `Download` wrapper struct — pull the wiring out of `main.rs`
 - [x] Status/progress — live counters and a sampled `DownloadStatus` feed, instead of the internals being silent
 - [x] GUI client — iced, with a file picker and several downloads at once
-- [ ] Periodic keep-alive messages
-- [ ] Supervise connection tasks — reclaim the peer slot when one panics
+- [x] Periodic keep-alive messages — sent into silence only, and inbound ones no longer swallowed by the decoder
+- [x] Supervise connection tasks — the peer manager watches the tasks rather than waiting to be told, so a panic no longer leaks the slot
 - [ ] `stopped` tracker event on shutdown
 - [ ] Inbound connections — TCP listener (`PeerConnection::from_stream` exists, nothing calls it)
 - [ ] Web seeds (BEP 19) — HTTP `url-list` sources for trackerless torrents
 - [ ] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
 - [ ] Per-peer status — the library aggregates today and keeps no peer registry
 - [ ] Pause and resume a running download
+- [ ] Skip announce URLs we cannot speak — `udp://` and `wss://` go to the HTTP client and fail forever (144 warnings in 90s on a WebTorrent-made torrent)
+- [ ] Announce `completed` when the download finishes, rather than at the next scheduled announce
 - [ ] Tracker communication — UDP tracker (BEP 15)
 - [ ] DHT (BEP 5) — decentralized peer discovery
 - [ ] Magnet links (BEP 9/10) — metadata exchange
-- [ ] Upload/seeding
+- [ ] Seeding — verified pieces cannot be served once a download finishes: reads go through the `.dhaar` file that `finalize` deletes, so `read_block` returns nothing
+- [ ] Message Stream Encryption (BEP 8) — WebTorrent opens encrypted handshakes by default, so its outgoing connections cannot talk to us at all
 - [ ] Rate limiting
 - [ ] `models/` module — shared domain types
 

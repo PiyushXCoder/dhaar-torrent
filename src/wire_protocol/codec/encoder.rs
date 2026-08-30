@@ -23,27 +23,20 @@ impl Encoder<WireItem> for WireCodec {
                 dst.put_slice(&hs.peer_id);
             }
             WireItem::Message(msg) => {
-                // length prefix + message id computed up front; fields written
-                // straight into `dst` (no intermediate payload buffer/clones).
-                let (msg_id, payload_len): (u8, usize) = match &msg {
-                    Message::Choke => (0, 0),
-                    Message::Unchoke => (1, 0),
-                    Message::Interested => (2, 0),
-                    Message::NotInterested => (3, 0),
-                    Message::Have(_) => (4, 4),
-                    Message::Bitfield(bitfield) => (5, bitfield.0.len()),
-                    Message::Request { .. } => (6, 12),
-                    Message::Piece { block, .. } => (7, 8 + block.len()),
-                    Message::Cancel { .. } => (8, 12),
-                    Message::Port(_) => (9, 2),
+                // Keep-alive is alone in having no id, so there is no header
+                // to write: the length prefix is the entire frame.
+                let Some((msg_id, payload_len)) = message_header(&msg) else {
+                    dst.reserve(4);
+                    dst.put_u32(0);
+                    return Ok(());
                 };
-
                 dst.reserve(4 + 1 + payload_len);
                 dst.put_u32(payload_len as u32 + 1);
                 dst.put_u8(msg_id);
 
                 match msg {
-                    Message::Choke
+                    Message::KeepAlive
+                    | Message::Choke
                     | Message::Unchoke
                     | Message::Interested
                     | Message::NotInterested => {}
@@ -89,4 +82,22 @@ impl Encoder<WireItem> for WireCodec {
         }
         Ok(())
     }
+}
+
+/// The message id and payload length written ahead of a message's fields.
+/// `None` for keep-alive, which has neither.
+fn message_header(message: &Message) -> Option<(u8, usize)> {
+    Some(match message {
+        Message::KeepAlive => return None,
+        Message::Choke => (0, 0),
+        Message::Unchoke => (1, 0),
+        Message::Interested => (2, 0),
+        Message::NotInterested => (3, 0),
+        Message::Have(_) => (4, 4),
+        Message::Bitfield(bitfield) => (5, bitfield.0.len()),
+        Message::Request { .. } => (6, 12),
+        Message::Piece { block, .. } => (7, 8 + block.len()),
+        Message::Cancel { .. } => (8, 12),
+        Message::Port(_) => (9, 2),
+    })
 }
