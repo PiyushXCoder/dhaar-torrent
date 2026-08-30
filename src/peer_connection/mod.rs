@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
 
+use std::sync::Arc;
+
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
     peer_manager::channels::{PeerManagerChannelMessage, PeerManagerChannelSender},
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
+    status::DownloadStats,
     wire_protocol::{Bitfield, Handshake, Message, WireCodec, WireItem},
 };
 
@@ -18,6 +21,7 @@ pub mod error;
 pub mod request_manager;
 
 pub struct PeerConnection {
+    pub stats: Arc<DownloadStats>,
     pub peer: Option<Peer>,
     pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
@@ -36,6 +40,7 @@ impl PeerConnection {
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
     ) -> PeerConnectionResult<Self> {
         let stream = TcpStream::connect(peer.address).await.map_err(|source| {
             PeerConnectionError::ConnectFailed {
@@ -45,6 +50,7 @@ impl PeerConnection {
         })?;
 
         Ok(PeerConnection {
+            stats,
             peer: Some(peer),
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
@@ -60,8 +66,10 @@ impl PeerConnection {
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
     ) -> Self {
         PeerConnection {
+            stats,
             peer: None,
             peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
@@ -162,6 +170,7 @@ impl PeerConnection {
             incoming_receiver,
             outgoing_sender,
             snapshot.events,
+            self.stats.clone(),
         );
 
         joinset.spawn(async move {

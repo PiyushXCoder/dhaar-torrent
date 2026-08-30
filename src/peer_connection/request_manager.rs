@@ -8,8 +8,11 @@ use crate::{
         BLOCK_SIZE,
         channel::{PieceEvent, PieceEventReceiver, PieceManagerChannelSender, PieceManagerMessage},
     },
+    status::DownloadStats,
     wire_protocol::{Bitfield, Message, WireItem},
 };
+
+use std::sync::Arc;
 
 use tokio::{
     select,
@@ -133,6 +136,7 @@ pub struct RequestManager {
     /// Taken with the bitfield this connection announced, so the two cannot
     /// disagree about what we hold.
     piece_events: PieceEventReceiver,
+    stats: Arc<DownloadStats>,
 }
 
 impl RequestManager {
@@ -147,6 +151,7 @@ impl RequestManager {
         incoming_channel_receiver: IncomingChannelReceiver,
         outgoing_channel_sender: OutgoingChannelSender,
         piece_events: PieceEventReceiver,
+        stats: Arc<DownloadStats>,
     ) -> Self {
         Self {
             peer,
@@ -165,6 +170,7 @@ impl RequestManager {
             incoming_channel_receiver,
             outgoing_channel_sender,
             piece_events,
+            stats,
         }
     }
 
@@ -590,6 +596,7 @@ impl RequestManager {
             return Ok(());
         };
         self.active_blocks.swap_remove(position);
+        self.stats.add_downloaded(block.len() as u64);
 
         let peer = self.peer.unwrap();
         self.send_to_piece_manager(PieceManagerMessage::ReceiveBlock {
@@ -659,6 +666,7 @@ impl RequestManager {
             return Ok(());
         }
         block.truncate(length as usize);
+        self.stats.add_uploaded(block.len() as u64);
         debug!(
             "{}: serving block {} of piece {} ({} bytes)",
             peer_addr(&self.peer),

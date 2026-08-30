@@ -4,7 +4,7 @@ use tokio::sync::{
     oneshot::Sender as OneShotSender,
 };
 
-use crate::{peer_explorer::Peer, wire_protocol::Bitfield};
+use crate::{peer_explorer::Peer, status::PieceState, wire_protocol::Bitfield};
 
 const CHANNEL_SIZE: usize = 256;
 /// Deep enough that a connection busy with a slow write does not miss events
@@ -64,6 +64,12 @@ pub enum PieceManagerMessage {
     },
     IsCompleted {
         response_sender: OneShotSender<bool>,
+    },
+    /// Every piece's standing, for a caller that draws them individually.
+    /// Built on demand rather than published, because it is sized by the
+    /// piece count and most callers only want the aggregate in `PieceProgress`.
+    GetPieceStates {
+        response_sender: OneShotSender<Vec<PieceState>>,
     },
 }
 

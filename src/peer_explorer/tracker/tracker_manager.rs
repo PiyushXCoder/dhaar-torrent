@@ -9,23 +9,34 @@ use tracing::{debug, info, warn};
 use crate::error::Result;
 use crate::peer_explorer::PeerSource;
 use crate::peer_explorer::channel::{PeerSourceChannelMessage, PeerSourceChannelSender};
+use crate::status::DownloadStats;
 
 use super::tcp_tracker_client::TcpTrackerClient;
 use super::tracker_client::TrackerClient;
-use super::tracker_client_messages::TrackerAnnounceQuery;
+use super::tracker_client_messages::{TrackerAnnounceQuery, TrackerEvent};
 
 pub struct TrackerManager {
     announce_urls: Vec<String>,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
+    /// Read fresh for every announce. Trackers use these figures to decide
+    /// who to hand out and to count seeders, so announcing zeroes forever
+    /// makes us look like a peer that takes and never gives.
+    stats: Arc<DownloadStats>,
 }
 
 impl TrackerManager {
-    pub fn new(announce_urls: Vec<String>, info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
+    pub fn new(
+        announce_urls: Vec<String>,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
+    ) -> Self {
         Self {
             announce_urls,
             info_hash: *info_hash,
             peer_id: *peer_id,
+            stats,
         }
     }
 }
@@ -59,8 +70,15 @@ impl PeerSource for TrackerManager {
         }
 
         let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id);
+        let stats = self.stats.clone();
         let join_handle = tokio::spawn(async move {
-            announce_tracker(&mut scheduler_heap, &query, &peer_source_channel_sender).await;
+            announce_tracker(
+                &mut scheduler_heap,
+                query,
+                stats,
+                &peer_source_channel_sender,
+            )
+            .await;
         });
         Ok(join_handle)
     }
@@ -68,10 +86,13 @@ impl PeerSource for TrackerManager {
 
 async fn announce_tracker(
     scheduler_heap: &mut BinaryHeap<Reverse<Tracker>>,
-    query: &TrackerAnnounceQuery,
+    query: TrackerAnnounceQuery,
+    stats: Arc<DownloadStats>,
     peer_explorer_channel_sender: &PeerSourceChannelSender,
 ) {
     info!("Starting to announce");
+    let mut announced_start = false;
+    let mut announced_completion = false;
     loop {
         let mut next = match scheduler_heap.pop() {
             Some(tracker) => tracker,
@@ -87,8 +108,30 @@ async fn announce_tracker(
         );
 
         tokio::time::sleep_until(next.next_instance).await;
-        debug!("Announcing to tracker: {}", next.announce_url);
-        let response = match next.tracker_client.announce(query).await {
+
+        // Built per announce: the counters have moved since the last one, and
+        // `left` reaching zero is how a tracker learns we became a seeder.
+        let complete = stats.is_complete();
+        let event = if !announced_start {
+            Some(TrackerEvent::Started)
+        } else if complete && !announced_completion {
+            Some(TrackerEvent::Completed)
+        } else {
+            None
+        };
+        let query = TrackerAnnounceQuery {
+            uploaded: stats.uploaded_bytes(),
+            downloaded: stats.downloaded_bytes(),
+            left: stats.remaining_bytes(),
+            event: event.clone(),
+            ..query.clone()
+        };
+
+        debug!(
+            "Announcing to tracker: {} (down={} up={} left={} event={:?})",
+            next.announce_url, query.downloaded, query.uploaded, query.left, query.event
+        );
+        let response = match next.tracker_client.announce(&query).await {
             Ok(response) => response,
             Err(e) => {
                 next.failure_count += 1;
@@ -121,6 +164,10 @@ async fn announce_tracker(
                 .send(PeerSourceChannelMessage::PeerFound(peer))
                 .await
                 .unwrap(); // TODO: handle errors
+        }
+        announced_start = true;
+        if complete {
+            announced_completion = true;
         }
         next.failure_count = 0;
         next.next_instance = Instant::now() + Duration::from_secs(min_interval as u64);

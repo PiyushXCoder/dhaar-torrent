@@ -1,9 +1,11 @@
+use crate::status::DownloadStats;
 use crate::{
     peer_connection::{PeerConnection, error::PeerConnectionError},
     peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
 };
 use channels::PeerManagerChannelMessage;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::warn;
 
@@ -19,8 +21,10 @@ where
     peer_slection_strategy: S,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
-    /// Peer connections currently in flight, capped at `MAX_PEERS`.
-    active: usize,
+    /// Peer connections currently in flight, capped at `MAX_PEERS`. Kept in
+    /// the shared counters rather than a field of its own, so a caller asking
+    /// for status sees the same number this loop makes decisions on.
+    stats: Arc<DownloadStats>,
     download_completed: bool,
 }
 
@@ -28,12 +32,17 @@ impl<S> PeerManager<S>
 where
     S: peer_selection_strategy::PeerSelectionStrategy + Sync + Send + 'static,
 {
-    pub fn new(peer_slection_strategy: S, info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
+    pub fn new(
+        peer_slection_strategy: S,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        stats: Arc<DownloadStats>,
+    ) -> Self {
         Self {
             peer_slection_strategy,
             info_hash: *info_hash,
             peer_id: *peer_id,
-            active: 0,
+            stats,
             download_completed: false,
         }
     }
@@ -72,7 +81,7 @@ where
                 msg = peer_manager_channel_receiver.recv() => {
                     match msg {
                         Some(PeerManagerChannelMessage::Closing(peer)) => {
-                            self.active -= 1;
+                            self.stats.peer_disconnected();
                             self.peer_slection_strategy.push(peer, true);
                         }
                         None => break,
@@ -87,7 +96,7 @@ where
                 }
                 Some(attempt) = self.peer_slection_strategy.pop(),
                     if !self.download_completed
-                        && self.active < MAX_PEERS
+                        && self.stats.active_peers() < MAX_PEERS
                         && self.peer_slection_strategy.peek().is_some() =>
                 {
                     // The flag can be stale by a few pieces, so confirm before
@@ -97,8 +106,9 @@ where
                         continue;
                     }
 
-                    self.active += 1;
+                    self.stats.peer_connected();
 
+                    let stats = self.stats.clone();
                     let peer_manager_channel_sender = peer_manager_channel_sender.clone();
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
@@ -113,6 +123,7 @@ where
                             piece_manager_channel_sender,
                             &info_hash,
                             &peer_id,
+                            stats,
                         )
                         .await
                         {

@@ -5,7 +5,15 @@ use tracing::{debug, info, warn};
 pub mod channel;
 pub mod piece_writer;
 
-use crate::{peer_explorer::Peer, wire_protocol::Bitfield};
+use std::sync::Arc;
+
+use tokio::sync::watch;
+
+use crate::{
+    peer_explorer::Peer,
+    status::{DownloadStats, PieceProgress, PieceState},
+    wire_protocol::Bitfield,
+};
 use channel::PieceManagerMessage;
 
 pub const BLOCK_SIZE: u64 = 16 * 1024;
@@ -24,6 +32,10 @@ where
     /// they can cancel work another peer already did and announce what we
     /// hold; nothing here waits on a subscriber.
     piece_events: channel::PieceEventSender,
+    stats: Arc<DownloadStats>,
+    /// Republished whenever a piece verifies. Only this loop writes it, so
+    /// every value it carries is of one instant.
+    progress: watch::Sender<PieceProgress>,
 }
 
 pub struct Piece {
@@ -86,6 +98,8 @@ where
         piece_length: u64,
         total_length: u64,
         piece_writer: W,
+        stats: Arc<DownloadStats>,
+        progress: watch::Sender<PieceProgress>,
     ) -> Self {
         let piceces = piece_hashes
             .chunks(20)
@@ -104,6 +118,8 @@ where
             pieces: piceces,
             piece_writer,
             piece_events: channel::new_piece_event_channel(),
+            stats,
+            progress,
         }
     }
 
@@ -112,6 +128,9 @@ where
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
         self.piece_writer.initialize().await.unwrap();
+        self.stats
+            .set_totals(self.total_pieces(), self.total_length);
+        self.publish_progress();
         info!(
             "Piece manager started: {} pieces, {} bytes/piece",
             self.total_pieces(),
@@ -174,6 +193,9 @@ where
                 }
                 PieceManagerMessage::IsCompleted { response_sender } => {
                     response_sender.send(self.is_completed()).unwrap();
+                }
+                PieceManagerMessage::GetPieceStates { response_sender } => {
+                    response_sender.send(self.piece_states()).unwrap();
                 }
             }
         }
@@ -400,6 +422,9 @@ where
             return Grant::Exhausted;
         }
         if !piece.requesters.contains(&peer) {
+            if piece.requesters.is_empty() {
+                self.stats.piece_claimed();
+            }
             piece.requesters.push(peer);
         }
         Grant::Held(channel::Claim {
@@ -416,7 +441,11 @@ where
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
         };
+        let was_held = !piece.requesters.is_empty();
         piece.requesters.retain(|requester| *requester != peer);
+        if was_held && piece.requesters.is_empty() {
+            self.stats.piece_released();
+        }
         if let Some(blocks) = piece.blocks.as_mut() {
             for block in blocks {
                 block.requesters.retain(|requester| *requester != peer);
@@ -440,6 +469,7 @@ where
         // race arrive here after the piece is done. Rewriting and rehashing a
         // finished piece for each one is pure waste.
         if piece.complete {
+            self.stats.add_wasted(block_data.len() as u64);
             return;
         }
         piece.ensure_initialized(piece_length);
@@ -468,7 +498,11 @@ where
             .as_ref()
             .is_none_or(|blocks| blocks.iter().all(|block| block.complete))
         {
+            let was_held = !piece.requesters.is_empty();
             piece.requesters.retain(|p| *p != peer);
+            if was_held && piece.requesters.is_empty() {
+                self.stats.piece_released();
+            }
             let data = self
                 .piece_writer
                 .read(piece_index, 0, self.piece_length, piece_length)
@@ -479,10 +513,16 @@ where
                 warn!("{}: piece failed its hash check", piece_index);
                 piece.blocks = None;
                 piece.complete = false;
+                // The whole piece has to be fetched again, so everything spent
+                // on it is spent twice.
+                self.stats.piece_failed_hash();
+                self.stats.add_wasted(piece_length);
                 return;
             }
             debug!("{}: piece complete, hash verified", piece_index);
             piece.complete = true;
+            self.stats.piece_verified(piece_length);
+            self.publish_progress();
             let _ = self
                 .piece_events
                 .send(channel::PieceEvent::PieceComplete { piece_index });
@@ -508,6 +548,48 @@ where
         }
         let end = (offset + BLOCK_SIZE as usize).min(data.len());
         data[offset..end].to_vec()
+    }
+
+    /// Republishes the coherent view. Called only where a piece's standing
+    /// actually changes, so subscribers see one update per completion rather
+    /// than a stream of identical values.
+    fn publish_progress(&self) {
+        let _ = self.progress.send(PieceProgress {
+            completed_pieces: self.pieces.iter().filter(|piece| piece.complete).count() as u32,
+            total_pieces: self.total_pieces(),
+            verified_bytes: self
+                .pieces
+                .iter()
+                .enumerate()
+                .filter(|(_, piece)| piece.complete)
+                .map(|(index, _)| self.piece_size(index as u32))
+                .sum(),
+            total_bytes: self.total_length,
+            bitfield: self.bitfield(),
+        });
+    }
+
+    /// Every piece's standing, for callers drawing a piece grid. Built on
+    /// demand: it is sized by the piece count, and most callers only ever
+    /// want the aggregate.
+    fn piece_states(&self) -> Vec<PieceState> {
+        self.pieces
+            .iter()
+            .map(|piece| {
+                if piece.complete {
+                    return PieceState::Complete;
+                }
+                match piece.blocks.as_ref() {
+                    // Never claimed, so never divided into blocks.
+                    None => PieceState::Pending,
+                    Some(blocks) => PieceState::InProgress {
+                        blocks_done: blocks.iter().filter(|block| block.complete).count() as u32,
+                        blocks_total: blocks.len() as u32,
+                        requesters: piece.requesters.len() as u32,
+                    },
+                }
+            })
+            .collect()
     }
 
     fn total_pieces(&self) -> u32 {
