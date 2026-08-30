@@ -62,6 +62,9 @@ pub enum PieceManagerMessage {
     TotalPieces {
         response_sender: OneShotSender<u32>,
     },
+    IsCompleted {
+        response_sender: OneShotSender<bool>,
+    },
 }
 
 /// Something finished. The piece manager is the only writer; connections

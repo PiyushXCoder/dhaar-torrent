@@ -1,9 +1,10 @@
 use crate::{
     peer_connection::{PeerConnection, error::PeerConnectionError},
     peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
-    piece_manager::channel::PieceManagerChannelSender,
+    piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
 };
 use channels::PeerManagerChannelMessage;
+use tokio::sync::oneshot;
 use tracing::warn;
 
 pub mod channels;
@@ -20,6 +21,7 @@ where
     peer_id: [u8; 20],
     /// Peer connections currently in flight, capped at `MAX_PEERS`.
     active: usize,
+    download_completed: bool,
 }
 
 impl<S> PeerManager<S>
@@ -32,7 +34,29 @@ where
             info_hash: *info_hash,
             peer_id: *peer_id,
             active: 0,
+            download_completed: false,
         }
+    }
+
+    /// Whether there is anything left to download, cached once true. The
+    /// answer only ever goes from false to true, so the piece manager is asked
+    /// until it says yes and never again.
+    async fn is_download_completed(&mut self, sender: &PieceManagerChannelSender) -> bool {
+        if self.download_completed {
+            return true;
+        }
+        let (response_sender, response) = oneshot::channel();
+        // A piece manager that has gone away leaves nothing to download for.
+        if sender
+            .send(PieceManagerMessage::IsCompleted { response_sender })
+            .await
+            .is_err()
+        {
+            self.download_completed = true;
+            return true;
+        }
+        self.download_completed = response.await.unwrap_or(true);
+        self.download_completed
     }
 
     pub async fn start(
@@ -62,14 +86,24 @@ where
                     }
                 }
                 Some(attempt) = self.peer_slection_strategy.pop(),
-                    if self.active < MAX_PEERS && self.peer_slection_strategy.peek().is_some() =>
+                    if !self.download_completed
+                        && self.active < MAX_PEERS
+                        && self.peer_slection_strategy.peek().is_some() =>
                 {
+                    // The flag can be stale by a few pieces, so confirm before
+                    // dialling: a peer connected now would hand back its piece
+                    // and close without transferring anything.
+                    if self.is_download_completed(&piece_manager_channel_sender).await {
+                        continue;
+                    }
+
                     self.active += 1;
 
                     let peer_manager_channel_sender = peer_manager_channel_sender.clone();
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
+
 
                     tokio::spawn(async move {
                         let connection_sender = peer_manager_channel_sender.clone();

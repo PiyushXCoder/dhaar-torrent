@@ -172,6 +172,9 @@ where
                 PieceManagerMessage::TotalPieces { response_sender } => {
                     response_sender.send(self.total_pieces()).unwrap();
                 }
+                PieceManagerMessage::IsCompleted { response_sender } => {
+                    response_sender.send(self.is_completed()).unwrap();
+                }
             }
         }
     }
@@ -505,5 +508,9 @@ where
 
     fn total_pieces(&self) -> u32 {
         self.pieces.len() as u32
+    }
+
+    fn is_completed(&self) -> bool {
+        self.pieces.iter().all(|piece| piece.complete)
     }
 }
