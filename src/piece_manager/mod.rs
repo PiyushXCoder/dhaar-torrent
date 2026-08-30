@@ -35,6 +35,16 @@ pub struct Block {
     pub requesters: Vec<Peer>,
 }
 
+/// Whether a claim will take a block somebody else is already downloading.
+#[derive(Clone, Copy, PartialEq)]
+enum Sharing {
+    /// One peer per block. Nothing is downloaded twice.
+    Exclusive,
+    /// Endgame: the same block may be in flight from several peers, so the
+    /// tail of a download is not held hostage by one slow one.
+    Shared,
+}
+
 /// Outcome of asking one piece for work.
 enum Grant {
     /// The peer keeps (or takes) the piece. The claim's block list can be
@@ -209,23 +219,14 @@ where
         peer: Peer,
         max_blocks: u32,
     ) -> channel::ClaimReply {
-        let mut released = None;
-        let mut granted = None;
+        let granted = self.grant_anywhere(piece_index, bitfield, peer, max_blocks);
 
-        if let Some(piece_index) = piece_index {
-            match self.grant_blocks(piece_index, peer, max_blocks) {
-                Grant::Held(claim) => granted = Some(claim),
-                Grant::Exhausted => {
-                    self.release(piece_index, peer);
-                    released = Some(piece_index);
-                }
-            }
-        }
-        if granted.is_none()
-            && let Some(piece_index) = self.select_piece(bitfield)
-            && let Grant::Held(claim) = self.grant_blocks(piece_index, peer, max_blocks)
+        let mut released = None;
+        if let Some(held) = piece_index
+            && granted.as_ref().map(|claim| claim.piece_index) != Some(held)
         {
-            granted = Some(claim);
+            self.release(held, peer);
+            released = Some(held);
         }
 
         // One piece per peer, and never one it is not working: everything that
@@ -246,6 +247,73 @@ where
         channel::ClaimReply { released, granted }
     }
 
+    /// Finds this peer something to do, in order of preference: the piece it
+    /// already holds, then one nobody holds, then — only once nothing is left
+    /// unclaimed anywhere — a piece somebody else is working.
+    fn grant_anywhere(
+        &mut self,
+        held: Option<u32>,
+        bitfield: &Bitfield,
+        peer: Peer,
+        max_blocks: u32,
+    ) -> Option<channel::Claim> {
+        if let Some(held) = held
+            && let Grant::Held(claim) =
+                self.grant_blocks(held, peer, max_blocks, Sharing::Exclusive)
+        {
+            return Some(claim);
+        }
+        if let Some(next) = self.select_piece(bitfield)
+            && let Grant::Held(claim) =
+                self.grant_blocks(next, peer, max_blocks, Sharing::Exclusive)
+        {
+            return Some(claim);
+        }
+
+        // Everything below duplicates work, so it waits until there is no
+        // untouched piece left for anyone. A peer with a poor bitfield must
+        // not start racing others while whole pieces still sit unclaimed.
+        if !self.is_endgame() {
+            return None;
+        }
+        if let Some(held) = held
+            && let Grant::Held(claim) = self.grant_blocks(held, peer, max_blocks, Sharing::Shared)
+        {
+            return Some(claim);
+        }
+        let next = self.select_shared_piece(bitfield, peer)?;
+        match self.grant_blocks(next, peer, max_blocks, Sharing::Shared) {
+            Grant::Held(claim) => Some(claim),
+            Grant::Exhausted => None,
+        }
+    }
+
+    /// True once every piece we still need is spoken for. That is the same
+    /// condition as having more peers than unfinished pieces, but measured
+    /// where the pieces are rather than counted from the connection side.
+    fn is_endgame(&self) -> bool {
+        !self
+            .pieces
+            .iter()
+            .any(|piece| !piece.complete && piece.requesters.is_empty())
+    }
+
+    /// Endgame counterpart to `select_piece`: the least crowded piece this
+    /// bitfield can serve, so peers spread across the remaining work instead
+    /// of piling onto whichever one comes first.
+    fn select_shared_piece(&self, bitfield: &Bitfield, peer: Peer) -> Option<u32> {
+        self.pieces
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| {
+                !piece.complete
+                    && bitfield.has_piece(*index as u32)
+                    && !piece.requesters.contains(&peer)
+            })
+            .min_by_key(|(_, piece)| piece.requesters.len())
+            .map(|(index, _)| index as u32)
+    }
+
     /// First piece this bitfield can serve that no peer holds. Working one
     /// piece per peer means a dead connection strands at most one piece.
     fn select_piece(&self, bitfield: &Bitfield) -> Option<u32> {
@@ -258,10 +326,16 @@ where
             .map(|(index, _)| index as u32)
     }
 
-    /// Registers `peer` against up to `max_blocks` unclaimed blocks of one
-    /// piece. `Exhausted` means the peer should let this piece go: there is
-    /// nothing left here for it and nothing of its own still outstanding.
-    fn grant_blocks(&mut self, piece_index: u32, peer: Peer, max_blocks: u32) -> Grant {
+    /// Registers `peer` against up to `max_blocks` blocks of one piece.
+    /// `Exhausted` means the peer should let this piece go: there is nothing
+    /// left here for it and nothing of its own still outstanding.
+    fn grant_blocks(
+        &mut self,
+        piece_index: u32,
+        peer: Peer,
+        max_blocks: u32,
+        sharing: Sharing,
+    ) -> Grant {
         let piece_length = self.piece_size(piece_index);
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return Grant::Exhausted;
@@ -276,31 +350,34 @@ where
             return Grant::Exhausted;
         };
 
-        let mut granted = Vec::new();
         let mut outstanding = false;
-        for (index, block) in blocks.iter_mut().enumerate() {
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
             if block.complete {
                 continue;
             }
-            // Ours already, or somebody else's: either way not on offer, but
-            // both mean the piece still has work left in it.
+            // Ours already: not on offer, but the piece still has work in it.
             if block.requesters.contains(&peer) {
                 outstanding = true;
                 continue;
             }
-            // TODO: endgame — near the end of a download the same block
-            // should be offered to several peers at once, so this is where
-            // the one-requester rule needs to relax.
-            if !block.requesters.is_empty() {
+            if !block.requesters.is_empty() && sharing == Sharing::Exclusive {
                 continue;
             }
-            if granted.len() >= max_blocks as usize {
-                outstanding = true;
-                continue;
-            }
-            block.requesters.push(peer);
-            granted.push(index as u32);
+            candidates.push((index, block.requesters.len()));
         }
+
+        // Least duplicated first. Under `Exclusive` every count is zero and
+        // this changes nothing; in endgame it spreads peers over the tail.
+        candidates.sort_by_key(|(_, requesters)| *requesters);
+        if candidates.len() > max_blocks as usize {
+            candidates.truncate(max_blocks as usize);
+            outstanding = true;
+        }
+        for (index, _) in &candidates {
+            blocks[*index].requesters.push(peer);
+        }
+        let granted: Vec<u32> = candidates.iter().map(|(index, _)| *index as u32).collect();
 
         if granted.is_empty() && !outstanding {
             return Grant::Exhausted;
@@ -342,6 +419,12 @@ where
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
         };
+        // Endgame asks several peers for the same block, so the losers of that
+        // race arrive here after the piece is done. Rewriting and rehashing a
+        // finished piece for each one is pure waste.
+        if piece.complete {
+            return;
+        }
         piece.ensure_initialized(piece_length);
         let Some(block_length) = piece.block_length else {
             return;
