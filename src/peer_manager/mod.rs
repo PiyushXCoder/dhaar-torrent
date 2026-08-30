@@ -1,15 +1,16 @@
 use crate::status::DownloadStats;
 use crate::{
-    peer_connection::{PeerConnection, error::PeerConnectionError},
-    peer_explorer::channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
+    peer_connection::PeerConnection,
+    peer_explorer::{
+        Peer,
+        channel::{PeerExplorerChannelMessage, PeerExplorerChannelReceiver},
+    },
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
 };
-use channels::PeerManagerChannelMessage;
-use std::sync::Arc;
-use tokio::sync::oneshot;
-use tracing::warn;
+use std::{collections::HashMap, sync::Arc};
+use tokio::{sync::oneshot, task, task::JoinSet};
+use tracing::{error, warn};
 
-pub mod channels;
 pub mod peer_selection_strategy;
 
 const MAX_PEERS: usize = 50;
@@ -73,19 +74,31 @@ where
         mut peer_explorer_channel_receiver: PeerExplorerChannelReceiver,
         piece_manager_channel_sender: PieceManagerChannelSender,
     ) {
-        let (peer_manager_channel_sender, mut peer_manager_channel_receiver) =
-            channels::new_peer_manager_channel();
+        // Connections are supervised rather than trusted to announce their own
+        // end. A task that panics or is dropped runs none of its teardown, so
+        // anything it was asked to report on the way out — the slot it holds,
+        // the peer to requeue — would be lost. Watching the tasks themselves
+        // catches every ending, including the ones that skip all our code.
+        let mut connections: JoinSet<()> = JoinSet::new();
+        // A panicking task returns nothing, so the peer it was dialling has to
+        // be recoverable from the task id alone.
+        let mut dialled: HashMap<task::Id, Peer> = HashMap::new();
 
         loop {
             tokio::select! {
-                msg = peer_manager_channel_receiver.recv() => {
-                    match msg {
-                        Some(PeerManagerChannelMessage::Closing(peer)) => {
-                            self.stats.peer_disconnected();
-                            self.peer_slection_strategy.push(peer, true);
-                        }
-                        None => break,
+                Some(outcome) = connections.join_next_with_id() => {
+                    let (id, panicked) = match outcome {
+                        Ok((id, ())) => (id, false),
+                        Err(e) => (e.id(), e.is_panic()),
+                    };
+                    let Some(peer) = dialled.remove(&id) else {
+                        continue;
+                    };
+                    if panicked {
+                        error!("{}: connection task panicked", peer.address);
                     }
+                    self.stats.peer_disconnected();
+                    self.peer_slection_strategy.push(peer, true);
                 }
                 Some(msg) = peer_explorer_channel_receiver.recv() => {
                     match msg {
@@ -108,18 +121,18 @@ where
 
                     self.stats.peer_connected();
 
+                    let peer = attempt.peer;
                     let stats = self.stats.clone();
-                    let peer_manager_channel_sender = peer_manager_channel_sender.clone();
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
 
-
-                    tokio::spawn(async move {
-                        let connection_sender = peer_manager_channel_sender.clone();
+                    // One task for the whole connection, not one to dial and
+                    // another to run it: only then does the task ending mean
+                    // the connection is over.
+                    let handle = connections.spawn(async move {
                         match PeerConnection::connect(
-                            attempt.peer,
-                            connection_sender,
+                            peer,
                             piece_manager_channel_sender,
                             &info_hash,
                             &peer_id,
@@ -127,21 +140,11 @@ where
                         )
                         .await
                         {
-                            Ok(peer_connection) => {
-                                tokio::spawn(peer_connection.start());
-                            },
-                            Err(e) => {
-                                warn!("{}", e);
-                                // Only `ConnectFailed` hands the peer back; without it
-                                // there is nothing to requeue.
-                                if let PeerConnectionError::ConnectFailed { peer, .. } = e {
-                                    let _ = peer_manager_channel_sender
-                                        .send(PeerManagerChannelMessage::Closing(*peer))
-                                        .await;
-                                }
-                            }
+                            Ok(peer_connection) => peer_connection.start().await,
+                            Err(e) => warn!("{}", e),
                         }
                     });
+                    dialled.insert(handle.id(), peer);
                 }
             }
         }

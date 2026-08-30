@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
-    peer_manager::channels::{PeerManagerChannelMessage, PeerManagerChannelSender},
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
     status::DownloadStats,
     wire_protocol::{Bitfield, Handshake, Message, WireCodec, WireItem},
@@ -23,7 +22,6 @@ pub mod request_manager;
 pub struct PeerConnection {
     pub stats: Arc<DownloadStats>,
     pub peer: Option<Peer>,
-    pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub stream: Option<TcpStream>,
     pub info_hash: [u8; 20],
@@ -36,7 +34,6 @@ impl PeerConnection {
     /// a single dead/unreachable peer.
     pub async fn connect(
         peer: Peer,
-        peer_manager_channel_sender: PeerManagerChannelSender,
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
@@ -52,7 +49,6 @@ impl PeerConnection {
         Ok(PeerConnection {
             stats,
             peer: Some(peer),
-            peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
@@ -62,7 +58,6 @@ impl PeerConnection {
 
     pub async fn from_stream(
         stream: TcpStream,
-        peer_manager_channel_sender: PeerManagerChannelSender,
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
@@ -71,7 +66,6 @@ impl PeerConnection {
         PeerConnection {
             stats,
             peer: None,
-            peer_manager_channel_sender: Some(peer_manager_channel_sender),
             piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
@@ -88,7 +82,7 @@ impl PeerConnection {
             }
             Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
         }
-        close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
+        close(&self.peer);
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
@@ -165,7 +159,6 @@ impl PeerConnection {
             self.info_hash,
             self.peer_id,
             peer_bitfield,
-            self.peer_manager_channel_sender.clone(),
             self.piece_manager_channel_sender.clone(),
             incoming_receiver,
             outgoing_sender,
@@ -301,19 +294,13 @@ impl PeerConnection {
     }
 }
 
-pub async fn close(
-    peer_manager_channel_sender: &mut Option<PeerManagerChannelSender>,
-    peer: &mut Option<Peer>,
-) {
+/// Marks the end of a connection.
+///
+/// Nothing is reported anywhere: the peer manager watches the connection's
+/// task instead of waiting to be told, because a task that panics or is
+/// dropped would never get as far as telling it.
+pub fn close(peer: &Option<Peer>) {
     debug!("{}: closing connection", peer_addr(peer));
-    if let Some((peer, peer_manager_channel_sender)) =
-        peer.take().zip(peer_manager_channel_sender.take())
-        && let Err(e) = peer_manager_channel_sender
-            .send(PeerManagerChannelMessage::Closing(peer))
-            .await
-    {
-        error!("Failed to close peer connection: {}", e);
-    }
 }
 
 fn peer_addr(peer: &Option<Peer>) -> String {

@@ -3,7 +3,6 @@ use super::{close, peer_addr, piece_manager_request};
 use crate::{
     peer_connection::error::{PeerConnectionError, PeerConnectionResult},
     peer_explorer::Peer,
-    peer_manager::channels::PeerManagerChannelSender,
     piece_manager::{
         BLOCK_SIZE,
         channel::{PieceEvent, PieceEventReceiver, PieceManagerChannelSender, PieceManagerMessage},
@@ -135,7 +134,6 @@ pub struct RequestManager {
     active_piece: Option<PieceHold>,
     pub active_piece_length: u64,
     pub active_blocks: Vec<u32>,
-    pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub incoming_channel_receiver: IncomingChannelReceiver,
     pub outgoing_channel_sender: OutgoingChannelSender,
@@ -155,7 +153,6 @@ impl RequestManager {
         info_hash: [u8; 20],
         peer_id: [u8; 20],
         peer_bitfield: Bitfield,
-        peer_manager_channel_sender: Option<PeerManagerChannelSender>,
         piece_manager_channel_sender: PieceManagerChannelSender,
         incoming_channel_receiver: IncomingChannelReceiver,
         outgoing_channel_sender: OutgoingChannelSender,
@@ -174,7 +171,6 @@ impl RequestManager {
             active_piece: None,
             active_piece_length: 0,
             active_blocks: Vec::new(),
-            peer_manager_channel_sender,
             piece_manager_channel_sender,
             incoming_channel_receiver,
             outgoing_channel_sender,
@@ -197,7 +193,7 @@ impl RequestManager {
             Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
         }
         self.release_active_piece().await;
-        close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
+        close(&self.peer);
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {

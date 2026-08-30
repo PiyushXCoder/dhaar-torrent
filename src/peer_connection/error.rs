@@ -2,10 +2,7 @@ use thiserror::Error;
 use tokio::io::Error;
 use tokio::sync::{mpsc::error::SendError, oneshot::error::RecvError};
 
-use crate::{
-    peer_explorer::Peer, peer_manager::channels::PeerManagerChannelMessage,
-    piece_manager::channel::PieceManagerMessage,
-};
+use crate::{peer_explorer::Peer, piece_manager::channel::PieceManagerMessage};
 
 #[derive(Debug, Error)]
 pub enum PeerConnectionError {
@@ -23,7 +20,9 @@ pub enum PeerConnectionError {
     UnexpectedMessage,
     #[error("peer disconnected")]
     PeerDisconnected,
-    /// Carries the peer back so the caller can requeue it instead of losing it.
+    /// Carries the peer so the failure can name it. Requeuing no longer
+    /// depends on this: the peer manager knows which peer each task was
+    /// dialling and reclaims it whichever way the task ends.
     #[error("failed to connect to peer {}: {source}", peer.address)]
     ConnectFailed {
         peer: Box<Peer>,
@@ -31,8 +30,6 @@ pub enum PeerConnectionError {
     },
     #[error("piece manager channel send error: {0}")]
     PieceManagerSend(#[from] SendError<PieceManagerMessage>),
-    #[error("peer manager channel send error: {0}")]
-    PeerManagerSend(#[from] SendError<PeerManagerChannelMessage>),
     #[error("piece manager dropped response channel: {0}")]
     ResponseChannelDropped(#[from] RecvError),
     #[error("timeout")]
