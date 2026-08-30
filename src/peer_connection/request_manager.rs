@@ -33,7 +33,6 @@ pub struct RequestManager {
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub peer_bitfield: Bitfield,
-    pub piece_length: u64,
     pub active_piece: Option<u32>,
     pub active_piece_length: u64,
     pub active_blocks: Vec<u32>,
@@ -50,7 +49,6 @@ impl RequestManager {
         info_hash: [u8; 20],
         peer_id: [u8; 20],
         peer_bitfield: Bitfield,
-        piece_length: u64,
         peer_manager_channel_sender: Option<PeerManagerChannelSender>,
         piece_manager_channel_sender: PieceManagerChannelSender,
         incoming_channel_receiver: IncomingChannelReceiver,
@@ -65,9 +63,8 @@ impl RequestManager {
             peer_choking: true,
             peer_interested: false,
             peer_bitfield,
-            piece_length,
             active_piece: None,
-            active_piece_length: piece_length,
+            active_piece_length: 0,
             active_blocks: Vec::new(),
             peer_manager_channel_sender,
             piece_manager_channel_sender,
@@ -83,7 +80,6 @@ impl RequestManager {
             }
             Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
         }
-        self.unlock_all().await;
         close(&mut self.peer_manager_channel_sender, &mut self.peer).await;
     }
 
@@ -108,7 +104,6 @@ impl RequestManager {
                     }
                 } => {
                     warn!("{}: requests timed out", peer_addr(&self.peer));
-                    self.unlock_active_blocks().await;
                     request_deadline = None;
                 },
                 _ = availability_tick.tick() => {
@@ -140,7 +135,6 @@ impl RequestManager {
                 self.peer_choking = true;
                 // The peer throws away every request it has not answered, so
                 // holding those block locks would strand them.
-                self.unlock_active_blocks().await;
             }
             WireItem::Message(Message::Unchoke) => {
                 self.peer_choking = false;
@@ -215,7 +209,7 @@ impl RequestManager {
     async fn update_interest(&mut self) -> PeerConnectionResult<()> {
         let bitfield = self.peer_bitfield.clone();
         let interested = self
-            .ask(|response_sender| PieceManagerMessage::AmInterested {
+            .ask(|response_sender| PieceManagerMessage::IsInteresting {
                 bitfield,
                 response_sender,
             })
@@ -287,31 +281,21 @@ impl RequestManager {
     async fn acquire_piece(&mut self) -> PeerConnectionResult<()> {
         let bitfield = self.peer_bitfield.clone();
         let candidates = self
-            .ask(
-                |response_sender| PieceManagerMessage::GetAllInterestedPieces {
-                    bitfield,
-                    response_sender,
-                },
-            )
+            .ask(|response_sender| PieceManagerMessage::GetIncompletePieces {
+                bitfield,
+                response_sender,
+            })
             .await?;
-        for piece_index in candidates {
-            let locked = self
-                .ask(|response_sender| PieceManagerMessage::LockPiece {
-                    piece_index,
-                    response_sender,
-                })
-                .await?;
-            if locked.is_some() {
-                self.active_piece = Some(piece_index);
-                self.active_piece_length = self
-                    .ask(|response_sender| PieceManagerMessage::PieceLengthAt {
-                        piece_index,
-                        response_sender,
-                    })
-                    .await?;
-                return Ok(());
-            }
-        }
+        let Some(piece_index) = candidates.get(0).copied() else {
+            return Err(PeerConnectionError::PeerDisconnected);
+        };
+        self.active_piece = Some(piece_index);
+        self.active_piece_length = self
+            .ask(|response_sender| PieceManagerMessage::PieceLength {
+                piece_index,
+                response_sender,
+            })
+            .await?;
         Ok(())
     }
 
@@ -471,29 +455,6 @@ impl RequestManager {
             block,
         })
         .await
-    }
-
-    /// Hands every in-flight block back, keeping the piece itself locked.
-    async fn unlock_active_blocks(&mut self) {
-        let Some(piece_index) = self.active_piece else {
-            self.active_blocks.clear();
-            return;
-        };
-        for block_index in std::mem::take(&mut self.active_blocks) {
-            self.send_to_piece_manager(PieceManagerMessage::UnlockBlock {
-                piece_index,
-                block_index,
-            })
-            .await;
-        }
-    }
-
-    async fn unlock_all(&mut self) {
-        self.unlock_active_blocks().await;
-        if let Some(piece_index) = self.active_piece.take() {
-            self.send_to_piece_manager(PieceManagerMessage::UnlockPiece { piece_index })
-                .await;
-        }
     }
 
     /// Unlocking happens on teardown, which races with piece manager shutdown,

@@ -120,7 +120,7 @@ async fn announce_tracker(
             peer_explorer_channel_sender
                 .send(PeerSourceChannelMessage::PeerFound(peer))
                 .await
-                .unwrap();
+                .unwrap(); // TODO: handle errors
         }
         next.failure_count = 0;
         next.next_instance = Instant::now() + Duration::from_secs(min_interval as u64);

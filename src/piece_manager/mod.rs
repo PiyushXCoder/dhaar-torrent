@@ -1,11 +1,11 @@
 use serde_bytes::ByteBuf;
 use sha1::Digest;
-use tracing::{error, info};
+use tracing::{info, warn};
 
 pub mod channel;
 pub mod piece_writer;
 
-use crate::wire_protocol::Bitfield;
+use crate::{peer_explorer::Peer, wire_protocol::Bitfield};
 use channel::PieceManagerMessage;
 
 pub const BLOCK_SIZE: u64 = 16 * 1024;
@@ -27,12 +27,11 @@ pub struct Piece {
     pub blocks: Option<Vec<Block>>,
     hash: [u8; 20],
     pub complete: bool,
-    locked: bool,
 }
 
 pub struct Block {
-    locked: bool,
     pub complete: bool,
+    pub requesters: Vec<Peer>,
 }
 
 impl Piece {
@@ -45,7 +44,7 @@ impl Piece {
         self.blocks = Some(
             (0..num_blocks)
                 .map(|_| Block {
-                    locked: false,
+                    requesters: Vec::new(),
                     complete: false,
                 })
                 .collect(),
@@ -71,7 +70,6 @@ where
                 block_length: None,
                 blocks: None,
                 complete: false,
-                locked: false,
             })
             .collect();
 
@@ -84,7 +82,7 @@ where
     }
 
     pub async fn start(
-        mut self,
+        &mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
         self.piece_writer.initialize().await.unwrap();
@@ -94,6 +92,7 @@ where
             self.piece_length
         );
         while let Some(msg) = piece_manager_channel_receiver.recv().await {
+            // TODO: error handling
             match msg {
                 PieceManagerMessage::HasPiece {
                     piece_index,
@@ -101,51 +100,32 @@ where
                 } => {
                     response_sender.send(self.has_piece(piece_index)).unwrap();
                 }
-                PieceManagerMessage::Bitfield { response_sender } => {
+                PieceManagerMessage::GetIncompleteBlocks {
+                    piece_index,
+                    response_sender,
+                } => {
+                    response_sender
+                        .send(self.get_incomplete_blocks(piece_index))
+                        .unwrap();
+                }
+                PieceManagerMessage::GetBitfield { response_sender } => {
                     response_sender.send(self.bitfield()).unwrap();
                 }
-                PieceManagerMessage::AmInterested {
-                    bitfield,
-                    response_sender,
-                } => {
-                    response_sender.send(self.am_interested(&bitfield)).unwrap();
-                }
-                PieceManagerMessage::GetAllInterestedPieces {
+                PieceManagerMessage::IsInteresting {
                     bitfield,
                     response_sender,
                 } => {
                     response_sender
-                        .send(self.get_all_interested_pieces(&bitfield))
+                        .send(self.is_interesting(&bitfield))
                         .unwrap();
                 }
-                PieceManagerMessage::GetNextInterestedPiece {
+                PieceManagerMessage::GetIncompletePieces {
                     bitfield,
                     response_sender,
                 } => {
                     response_sender
-                        .send(self.get_next_interested_piece(&bitfield))
+                        .send(self.get_incomplete_pieces(&bitfield))
                         .unwrap();
-                }
-                PieceManagerMessage::LockPiece {
-                    piece_index,
-                    response_sender,
-                } => {
-                    response_sender.send(self.lock_piece(piece_index)).unwrap();
-                }
-                PieceManagerMessage::LockBlock {
-                    piece_index,
-                    block_index,
-                    response_sender,
-                } => {
-                    response_sender
-                        .send(self.lock_block(piece_index, block_index))
-                        .unwrap();
-                }
-                PieceManagerMessage::UnlockBlock {
-                    piece_index,
-                    block_index,
-                } => {
-                    self.unlock_block(piece_index, block_index);
                 }
                 PieceManagerMessage::ReceiveBlock {
                     piece_index,
@@ -164,50 +144,14 @@ where
                         .send(self.read_block(piece_index, block_index).await)
                         .unwrap();
                 }
-                PieceManagerMessage::GetIncompleteBlocks {
-                    piece_index,
-                    response_sender,
-                } => {
-                    response_sender
-                        .send(self.get_incomplete_blocks(piece_index))
-                        .unwrap();
-                }
-                PieceManagerMessage::VerifyPiece {
-                    piece_index,
-                    response_sender,
-                } => {
-                    response_sender
-                        .send(self.verify_piece(piece_index).await)
-                        .unwrap();
-                }
-                PieceManagerMessage::CompletePiece {
-                    piece_index,
-                    response_sender,
-                } => {
-                    response_sender
-                        .send(self.complete_piece(piece_index).await)
-                        .unwrap();
-                }
-                PieceManagerMessage::UnlockPiece { piece_index } => {
-                    self.unlock_piece(piece_index);
-                }
-                PieceManagerMessage::CompletedPiece { response_sender } => {
-                    response_sender.send(self.completed_pieces()).unwrap();
-                }
                 PieceManagerMessage::TotalPieces { response_sender } => {
                     response_sender.send(self.total_pieces()).unwrap();
                 }
-                PieceManagerMessage::PieceLength { response_sender } => {
-                    response_sender.send(self.piece_length).unwrap();
-                }
-                PieceManagerMessage::PieceLengthAt {
+                PieceManagerMessage::PieceLength {
                     piece_index,
                     response_sender,
                 } => {
                     response_sender.send(self.piece_size(piece_index)).unwrap();
-                }
-                PieceManagerMessage::ResetPiece { piece_index } => {
-                    self.reset_piece(piece_index);
                 }
             }
         }
@@ -239,7 +183,7 @@ where
         Bitfield(bytes)
     }
 
-    fn am_interested(&self, bitfield: &Bitfield) -> bool {
+    fn is_interesting(&self, bitfield: &Bitfield) -> bool {
         self.pieces
             .iter()
             .enumerate()
@@ -249,7 +193,7 @@ where
     /// Every piece we still need that `bitfield` can serve. Locked pieces are
     /// included: `lock_piece` is the arbiter, so callers race there instead of
     /// acting on a list that may already be stale.
-    fn get_all_interested_pieces(&self, bitfield: &Bitfield) -> Vec<u32> {
+    fn get_incomplete_pieces(&self, bitfield: &Bitfield) -> Vec<u32> {
         self.pieces
             .iter()
             .enumerate()
@@ -258,70 +202,53 @@ where
             .collect()
     }
 
-    /// Claims `piece_index` for one peer. `None` means somebody else got it
-    /// first, or it is already done.
-    fn lock_piece(&mut self, piece_index: u32) -> Option<u32> {
-        let piece_length = self.piece_size(piece_index);
-        let piece = self.pieces.get_mut(piece_index as usize)?;
-        if piece.complete || piece.locked {
-            return None;
-        }
-        piece.locked = true;
-        piece.ensure_initialized(piece_length);
-        Some(piece_index)
-    }
-
-    /// Claims one block inside an already locked piece.
-    fn lock_block(&mut self, piece_index: u32, block_index: u32) -> bool {
-        let piece_length = self.piece_size(piece_index);
-        let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
-            return false;
-        };
-        piece.ensure_initialized(piece_length);
-        let Some(blocks) = piece.blocks.as_mut() else {
-            return false;
-        };
-        let Some(block) = blocks.get_mut(block_index as usize) else {
-            return false;
-        };
-        if block.locked || block.complete {
-            return false;
-        }
-        block.locked = true;
-        true
-    }
-
-    fn unlock_block(&mut self, piece_index: u32, block_index: u32) {
-        if let Some(piece) = self.pieces.get_mut(piece_index as usize)
-            && let Some(blocks) = piece.blocks.as_mut()
-            && let Some(block) = blocks.get_mut(block_index as usize)
-        {
-            block.locked = false;
-        }
-    }
-
     async fn receive_block(&mut self, piece_index: u32, block_index: u32, block_data: Vec<u8>) {
+        let piece_length = self.piece_size(piece_index);
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
         };
+        piece.ensure_initialized(piece_length);
         let Some(block_length) = piece.block_length else {
             return;
         };
         let offset = block_index as u64 * block_length;
         self.piece_writer
-            .write(piece_index, offset, block_data)
+            .write(piece_index, offset, self.piece_length, block_data)
             .await
-            .unwrap();
+            .unwrap(); // TODO: handle errors
         if let Some(blocks) = piece.blocks.as_mut()
             && let Some(block) = blocks.get_mut(block_index as usize)
         {
             block.complete = true;
         }
+        if piece
+            .blocks
+            .as_ref()
+            .map_or(true, |blocks| blocks.iter().all(|block| block.complete))
+        {
+            let data = self
+                .piece_writer
+                .read(piece_index, 0, self.piece_length, piece_length)
+                .await
+                .unwrap();
+            let hash: [u8; 20] = sha1::Sha1::digest(&data).into();
+            if hash != piece.hash {
+                warn!("{}: piece failed its hash check", piece_index);
+                piece.blocks = None;
+                piece.complete = false;
+                return;
+            }
+            piece.complete = true;
+        }
     }
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
         let piece_size = self.piece_size(piece_index);
-        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
+        let Ok(data) = self
+            .piece_writer
+            .read(piece_index, 0, self.piece_length, piece_size)
+            .await
+        else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -332,61 +259,6 @@ where
         data[offset..end].to_vec()
     }
 
-    async fn verify_piece(&self, piece_index: u32) -> bool {
-        let Some(piece) = self.pieces.get(piece_index as usize) else {
-            return false;
-        };
-        let Ok(data) = self
-            .piece_writer
-            .read(piece_index, 0, self.piece_size(piece_index))
-            .await
-        else {
-            return false;
-        };
-        let digest: [u8; 20] = sha1::Sha1::digest(&data).into();
-        digest == piece.hash
-    }
-
-    async fn complete_piece(&mut self, piece_index: u32) -> bool {
-        let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
-            return false;
-        };
-        piece.complete = true;
-        piece.blocks = None;
-        piece.block_length = None;
-
-        let completed = self.completed_pieces();
-        let total = self.total_pieces();
-        info!(
-            "Piece {} verified and complete ({}/{})",
-            piece_index, completed, total
-        );
-
-        if completed == total {
-            if let Err(e) = self.piece_writer.finalize().await {
-                error!("Failed to finalize download: {}", e);
-            } else {
-                info!(
-                    "Download complete, all {} pieces verified and written to disk",
-                    total
-                );
-            }
-        }
-
-        true
-    }
-
-    fn unlock_piece(&mut self, piece_index: u32) {
-        if let Some(piece) = self.pieces.get_mut(piece_index as usize) {
-            piece.locked = false;
-            if let Some(blocks) = piece.blocks.as_mut() {
-                for block in blocks.iter_mut() {
-                    block.locked = false;
-                }
-            }
-        }
-    }
-
     fn completed_pieces(&self) -> u32 {
         self.pieces.iter().filter(|piece| piece.complete).count() as u32
     }
@@ -395,9 +267,7 @@ where
         self.pieces.len() as u32
     }
 
-    /// Blocks of `piece_index` we still need. Empty for a piece that was
-    /// never locked, since its block list only exists once it is claimed.
-    fn get_incomplete_blocks(&self, piece_index: u32) -> Vec<u32> {
+    fn get_incomplete_blocks(&self, piece_index: u32) -> Vec<channel::Block> {
         let Some(piece) = self.pieces.get(piece_index as usize) else {
             return Vec::new();
         };
@@ -408,20 +278,10 @@ where
             .iter()
             .enumerate()
             .filter(|(_, block)| !block.complete)
-            .map(|(index, _)| index as u32)
+            .map(|(index, block)| channel::Block {
+                index: index as u32,
+                requester_len: block.requesters.len() as u64,
+            })
             .collect()
-    }
-
-    /// Throws away a piece's block progress. The data on disk stays, but every
-    /// block is now considered missing so it gets overwritten.
-    fn reset_piece(&mut self, piece_index: u32) {
-        if let Some(piece) = self.pieces.get_mut(piece_index as usize) {
-            piece.blocks = None;
-            piece.block_length = None;
-        }
-    }
-
-    fn get_next_interested_piece(&self, bitfield: &Bitfield) -> Option<u32> {
-        self.get_all_interested_pieces(bitfield).first().cloned()
     }
 }

@@ -39,7 +39,6 @@ async fn main() {
     let peer_explorer = PeerExplorer::new(vec![Box::new(tracker_manager)]);
     let total_length = torrent.info.total_length();
     let piece_writer = DiskPieceWriter::new(
-        torrent.info.piece_length,
         total_length,
         &torrent.info.name,
         torrent.info.length,

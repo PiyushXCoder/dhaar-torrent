@@ -87,7 +87,7 @@ impl PeerConnection {
         let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
         self.handshake(&mut framed).await?;
         let our_bitfield = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
-            PieceManagerMessage::Bitfield {
+            PieceManagerMessage::GetBitfield {
                 response_sender: tx,
             }
         })
@@ -96,13 +96,6 @@ impl PeerConnection {
         framed
             .send(WireItem::Message(Message::Bitfield(our_bitfield)))
             .await?;
-
-        let piece_length = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
-            PieceManagerMessage::PieceLength {
-                response_sender: tx,
-            }
-        })
-        .await?;
 
         let peer_bitfield: Bitfield;
         select! {
@@ -161,7 +154,6 @@ impl PeerConnection {
             self.info_hash,
             self.peer_id,
             peer_bitfield,
-            piece_length,
             self.peer_manager_channel_sender.clone(),
             self.piece_manager_channel_sender.clone(),
             incoming_receiver,

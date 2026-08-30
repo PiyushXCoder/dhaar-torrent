@@ -12,72 +12,32 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         response_sender: OneShotSender<bool>,
     },
-    Bitfield {
+    GetBitfield {
         response_sender: OneShotSender<Bitfield>,
     },
-    GetAllInterestedPieces {
+    GetIncompletePieces {
         bitfield: Bitfield,
         response_sender: OneShotSender<Vec<u32>>,
     },
-    GetNextInterestedPiece {
-        bitfield: Bitfield,
-        response_sender: OneShotSender<Option<u32>>,
+    GetIncompleteBlocks {
+        piece_index: u32,
+        response_sender: OneShotSender<Vec<Block>>,
     },
-    AmInterested {
+    IsInteresting {
         bitfield: Bitfield,
         response_sender: OneShotSender<bool>,
     },
 
-    LockPiece {
-        piece_index: u32,
-        response_sender: OneShotSender<Option<u32>>,
-    },
-    UnlockPiece {
-        piece_index: u32,
-    },
-    CompletedPiece {
-        response_sender: OneShotSender<u32>,
-    },
     TotalPieces {
         response_sender: OneShotSender<u32>,
     },
-    PieceLength {
-        response_sender: OneShotSender<u64>,
-    },
     /// Length of one specific piece. Only the last piece differs from
     /// `PieceLength`, and getting it wrong strands that piece.
-    PieceLengthAt {
+    PieceLength {
         piece_index: u32,
         response_sender: OneShotSender<u64>,
     },
-    VerifyPiece {
-        piece_index: u32,
-        response_sender: OneShotSender<bool>,
-    },
-    CompletePiece {
-        piece_index: u32,
-        response_sender: OneShotSender<bool>,
-    },
-    /// Forgets a piece's block progress so it can be fetched again from
-    /// scratch, used when the assembled piece fails its hash check.
-    ResetPiece {
-        piece_index: u32,
-    },
 
-    GetIncompleteBlocks {
-        piece_index: u32,
-        response_sender: OneShotSender<Vec<u32>>,
-    },
-
-    LockBlock {
-        piece_index: u32,
-        block_index: u32,
-        response_sender: OneShotSender<bool>,
-    },
-    UnlockBlock {
-        piece_index: u32,
-        block_index: u32,
-    },
     ReceiveBlock {
         piece_index: u32,
         block_index: u32,
@@ -88,6 +48,12 @@ pub enum PieceManagerMessage {
         block_index: u32,
         response_sender: OneShotSender<Vec<u8>>,
     },
+}
+
+#[derive(Debug)]
+pub struct Block {
+    pub index: u32,
+    pub requester_len: u64,
 }
 
 pub type PieceManagerChannelSender = Sender<PieceManagerMessage>;

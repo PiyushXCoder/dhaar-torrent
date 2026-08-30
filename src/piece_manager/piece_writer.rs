@@ -16,12 +16,14 @@ pub trait PieceWriter {
         &self,
         piece_index: u32,
         piece_offset: u64,
+        piece_length: u64,
         length: u64,
     ) -> Result<Vec<u8>, Self::Error>;
     async fn write(
         &self,
         piece_index: u32,
         piece_offset: u64,
+        piece_length: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error>;
     async fn finalize(&self) -> Result<(), Self::Error>;
@@ -29,7 +31,6 @@ pub trait PieceWriter {
 
 pub struct DiskPieceWriter {
     pub temp_file: PathBuf,
-    pub piece_length: u64,
     pub total_length: u64,
     pub name: String,
     pub length: Option<u64>,
@@ -39,7 +40,6 @@ pub struct DiskPieceWriter {
 
 impl DiskPieceWriter {
     pub fn new(
-        piece_length: u64,
         total_length: u64,
         name: &String,
         length: Option<u64>,
@@ -51,7 +51,6 @@ impl DiskPieceWriter {
             .join(format!("{name}.dhaar"));
         Self {
             temp_file,
-            piece_length,
             total_length,
             name: name.clone(),
             length,
@@ -82,11 +81,12 @@ impl PieceWriter for DiskPieceWriter {
         &self,
         piece_index: u32,
         piece_offset: u64,
+        piece_length: u64,
         length: u64,
     ) -> Result<Vec<u8>, Self::Error> {
         let mut file = File::open(&self.temp_file).await?;
         file.seek(SeekFrom::Start(
-            self.piece_length * piece_index as u64 + piece_offset,
+            piece_length * piece_index as u64 + piece_offset,
         ))
         .await?;
         let mut buf = vec![0; length as usize];
@@ -97,11 +97,12 @@ impl PieceWriter for DiskPieceWriter {
         &self,
         piece_index: u32,
         piece_offset: u64,
+        piece_length: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error> {
         let mut file = OpenOptions::new().write(true).open(&self.temp_file).await?;
         file.seek(SeekFrom::Start(
-            self.piece_length * piece_index as u64 + piece_offset,
+            piece_length * piece_index as u64 + piece_offset,
         ))
         .await?;
         file.write_all(&data).await?;
