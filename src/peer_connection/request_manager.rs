@@ -36,6 +36,7 @@ pub struct RequestManager {
     pub active_piece: Option<u32>,
     pub active_piece_length: u64,
     pub active_blocks: Vec<u32>,
+    pub is_end_game_active: bool,
     pub peer_manager_channel_sender: Option<PeerManagerChannelSender>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub incoming_channel_receiver: IncomingChannelReceiver,
@@ -66,6 +67,7 @@ impl RequestManager {
             active_piece: None,
             active_piece_length: 0,
             active_blocks: Vec::new(),
+            is_end_game_active: false,
             peer_manager_channel_sender,
             piece_manager_channel_sender,
             incoming_channel_receiver,
@@ -247,31 +249,34 @@ impl RequestManager {
             })
             .await?;
 
-        for block_index in candidates {
+        let peer = self.peer.unwrap();
+        for block in candidates {
             if self.active_blocks.len() >= MAX_REQUESTS as usize {
                 break;
             }
-            if self.active_blocks.contains(&block_index) {
-                continue;
+            if self.is_end_game_active {
+                // TODO: endgame
+            } else {
+                if block.requesters_len > 1 {
+                    continue;
+                }
             }
-            let locked = self
-                .ask(|response_sender| PieceManagerMessage::LockBlock {
-                    piece_index,
-                    block_index,
-                    response_sender,
-                })
-                .await?;
-            if !locked {
-                continue;
-            }
-            let (begin, length) = self.block_bounds(block_index);
+
+            self.ask(|_| PieceManagerMessage::RegisterRequesting {
+                piece_index,
+                block_index: block.index,
+                peer,
+            })
+            .await?;
+
+            let (begin, length) = self.block_bounds(block.index);
             self.send_message(Message::Request {
                 index: piece_index,
                 begin,
                 length,
             })
             .await?;
-            self.active_blocks.push(block_index);
+            self.active_blocks.push(block.index);
         }
         Ok(())
     }
@@ -286,9 +291,22 @@ impl RequestManager {
                 response_sender,
             })
             .await?;
-        let Some(piece_index) = candidates.get(0).copied() else {
-            return Err(PeerConnectionError::PeerDisconnected);
-        };
+
+        let mut piece_index: u32 = 0;
+        for piece in candidates {
+            if self.is_end_game_active {
+                // TODO: endgame
+            } else {
+                if piece.requesters_len == 0 {
+                    piece_index = piece.index;
+                    break;
+                }
+            }
+            if piece_index == 0 {
+                return Err(PeerConnectionError::PeerDisconnected);
+            }
+        }
+
         self.active_piece = Some(piece_index);
         self.active_piece_length = self
             .ask(|response_sender| PieceManagerMessage::PieceLength {
@@ -350,60 +368,19 @@ impl RequestManager {
         };
         self.active_blocks.swap_remove(position);
 
+        let peer = self.peer.unwrap();
         self.send_to_piece_manager(PieceManagerMessage::ReceiveBlock {
             piece_index,
             block_index,
             block_data: block,
+            peer,
         })
         .await;
 
-        // The piece manager handles messages in order, so this already
-        // accounts for the block above.
-        let remaining = self
-            .ask(|response_sender| PieceManagerMessage::GetIncompleteBlocks {
-                piece_index,
-                response_sender,
-            })
-            .await?;
-        if remaining.is_empty() {
-            self.finish_piece(piece_index).await?;
+        if self.active_blocks.is_empty() {
+            self.active_piece = None;
         }
         self.fill_pipeline().await
-    }
-
-    /// Hashes an assembled piece and either commits it or throws the progress
-    /// away. A bad hash is unattributable — any peer that touched the piece
-    /// could have poisoned it — so this only resets it for a redownload
-    /// instead of blaming the peer that happened to finish it.
-    async fn finish_piece(&mut self, piece_index: u32) -> PeerConnectionResult<()> {
-        self.active_blocks.clear();
-        self.active_piece = None;
-        self.active_piece_length = self.piece_length;
-
-        let valid = self
-            .ask(|response_sender| PieceManagerMessage::VerifyPiece {
-                piece_index,
-                response_sender,
-            })
-            .await?;
-        if valid {
-            self.ask(|response_sender| PieceManagerMessage::CompletePiece {
-                piece_index,
-                response_sender,
-            })
-            .await?;
-        } else {
-            warn!(
-                "{}: piece {} failed its hash check",
-                peer_addr(&self.peer),
-                piece_index
-            );
-            self.send_to_piece_manager(PieceManagerMessage::ResetPiece { piece_index })
-                .await;
-        }
-        self.send_to_piece_manager(PieceManagerMessage::UnlockPiece { piece_index })
-            .await;
-        self.update_interest().await
     }
 
     /// Answers a peer's request out of our own storage.

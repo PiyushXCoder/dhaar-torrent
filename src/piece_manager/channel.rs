@@ -3,7 +3,7 @@ use tokio::sync::{
     oneshot::Sender as OneShotSender,
 };
 
-use crate::wire_protocol::Bitfield;
+use crate::{peer_explorer::Peer, wire_protocol::Bitfield};
 
 const CHANNEL_SIZE: usize = 256;
 
@@ -17,7 +17,7 @@ pub enum PieceManagerMessage {
     },
     GetIncompletePieces {
         bitfield: Bitfield,
-        response_sender: OneShotSender<Vec<u32>>,
+        response_sender: OneShotSender<Vec<Piece>>,
     },
     GetIncompleteBlocks {
         piece_index: u32,
@@ -26,6 +26,22 @@ pub enum PieceManagerMessage {
     IsInteresting {
         bitfield: Bitfield,
         response_sender: OneShotSender<bool>,
+    },
+    RegisterRequesting {
+        piece_index: u32,
+        block_index: u32,
+        peer: Peer,
+    },
+    ReceiveBlock {
+        piece_index: u32,
+        block_index: u32,
+        block_data: Vec<u8>,
+        peer: Peer,
+    },
+    ReadBlock {
+        piece_index: u32,
+        block_index: u32,
+        response_sender: OneShotSender<Vec<u8>>,
     },
 
     TotalPieces {
@@ -37,23 +53,18 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         response_sender: OneShotSender<u64>,
     },
-
-    ReceiveBlock {
-        piece_index: u32,
-        block_index: u32,
-        block_data: Vec<u8>,
-    },
-    ReadBlock {
-        piece_index: u32,
-        block_index: u32,
-        response_sender: OneShotSender<Vec<u8>>,
-    },
 }
 
 #[derive(Debug)]
 pub struct Block {
     pub index: u32,
-    pub requester_len: u64,
+    pub requesters_len: u64,
+}
+
+#[derive(Debug)]
+pub struct Piece {
+    pub index: u32,
+    pub requesters_len: u64,
 }
 
 pub type PieceManagerChannelSender = Sender<PieceManagerMessage>;

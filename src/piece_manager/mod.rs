@@ -27,6 +27,7 @@ pub struct Piece {
     pub blocks: Option<Vec<Block>>,
     hash: [u8; 20],
     pub complete: bool,
+    pub requesters: Vec<Peer>,
 }
 
 pub struct Block {
@@ -70,6 +71,7 @@ where
                 block_length: None,
                 blocks: None,
                 complete: false,
+                requesters: Vec::new(),
             })
             .collect();
 
@@ -82,7 +84,7 @@ where
     }
 
     pub async fn start(
-        &mut self,
+        mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
         self.piece_writer.initialize().await.unwrap();
@@ -127,12 +129,20 @@ where
                         .send(self.get_incomplete_pieces(&bitfield))
                         .unwrap();
                 }
+                PieceManagerMessage::RegisterRequesting {
+                    piece_index,
+                    block_index,
+                    peer,
+                } => {
+                    self.register_requesting(piece_index, block_index, peer);
+                }
                 PieceManagerMessage::ReceiveBlock {
                     piece_index,
                     block_index,
                     block_data,
+                    peer,
                 } => {
-                    self.receive_block(piece_index, block_index, block_data)
+                    self.receive_block(piece_index, block_index, block_data, peer)
                         .await;
                 }
                 PieceManagerMessage::ReadBlock {
@@ -193,16 +203,25 @@ where
     /// Every piece we still need that `bitfield` can serve. Locked pieces are
     /// included: `lock_piece` is the arbiter, so callers race there instead of
     /// acting on a list that may already be stale.
-    fn get_incomplete_pieces(&self, bitfield: &Bitfield) -> Vec<u32> {
+    fn get_incomplete_pieces(&self, bitfield: &Bitfield) -> Vec<channel::Piece> {
         self.pieces
             .iter()
             .enumerate()
             .filter(|(index, piece)| !piece.complete && bitfield.has_piece(*index as u32))
-            .map(|(index, _)| index as u32)
+            .map(|(index, piece)| channel::Piece {
+                index: index as u32,
+                requesters_len: piece.requesters.len() as u64,
+            })
             .collect()
     }
 
-    async fn receive_block(&mut self, piece_index: u32, block_index: u32, block_data: Vec<u8>) {
+    async fn receive_block(
+        &mut self,
+        piece_index: u32,
+        block_index: u32,
+        block_data: Vec<u8>,
+        peer: Peer,
+    ) {
         let piece_length = self.piece_size(piece_index);
         let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
             return;
@@ -220,12 +239,14 @@ where
             && let Some(block) = blocks.get_mut(block_index as usize)
         {
             block.complete = true;
+            block.requesters.retain(|p| *p != peer);
         }
         if piece
             .blocks
             .as_ref()
             .map_or(true, |blocks| blocks.iter().all(|block| block.complete))
         {
+            piece.requesters.retain(|p| *p != peer);
             let data = self
                 .piece_writer
                 .read(piece_index, 0, self.piece_length, piece_length)
@@ -259,10 +280,6 @@ where
         data[offset..end].to_vec()
     }
 
-    fn completed_pieces(&self) -> u32 {
-        self.pieces.iter().filter(|piece| piece.complete).count() as u32
-    }
-
     fn total_pieces(&self) -> u32 {
         self.pieces.len() as u32
     }
@@ -280,8 +297,20 @@ where
             .filter(|(_, block)| !block.complete)
             .map(|(index, block)| channel::Block {
                 index: index as u32,
-                requester_len: block.requesters.len() as u64,
+                requesters_len: block.requesters.len() as u64,
             })
             .collect()
+    }
+
+    fn register_requesting(&mut self, piece_index: u32, block_index: u32, peer: Peer) {
+        let Some(piece) = self.pieces.get_mut(piece_index as usize) else {
+            return;
+        };
+        piece.requesters.push(peer);
+        if let Some(blocks) = piece.blocks.as_mut() {
+            if let Some(block) = blocks.get_mut(block_index as usize) {
+                block.requesters.push(peer);
+            }
+        }
     }
 }
