@@ -6,7 +6,7 @@ use crate::{
     peer_manager::channels::PeerManagerChannelSender,
     piece_manager::{
         BLOCK_SIZE,
-        channel::{PieceEvent, PieceManagerChannelSender, PieceManagerMessage},
+        channel::{PieceEvent, PieceEventReceiver, PieceManagerChannelSender, PieceManagerMessage},
     },
     wire_protocol::{Bitfield, Message, WireItem},
 };
@@ -130,6 +130,9 @@ pub struct RequestManager {
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub incoming_channel_receiver: IncomingChannelReceiver,
     pub outgoing_channel_sender: OutgoingChannelSender,
+    /// Taken with the bitfield this connection announced, so the two cannot
+    /// disagree about what we hold.
+    piece_events: PieceEventReceiver,
 }
 
 impl RequestManager {
@@ -143,6 +146,7 @@ impl RequestManager {
         piece_manager_channel_sender: PieceManagerChannelSender,
         incoming_channel_receiver: IncomingChannelReceiver,
         outgoing_channel_sender: OutgoingChannelSender,
+        piece_events: PieceEventReceiver,
     ) -> Self {
         Self {
             peer,
@@ -160,6 +164,7 @@ impl RequestManager {
             piece_manager_channel_sender,
             incoming_channel_receiver,
             outgoing_channel_sender,
+            piece_events,
         }
     }
 
@@ -184,12 +189,6 @@ impl RequestManager {
         let mut request_deadline: Option<time::Instant> = None;
         let mut availability_tick = time::interval(AVAILABILITY_TICK);
 
-        // Subscribed to before anything else is done, so no completion that
-        // happens while this connection is starting up goes unnoticed.
-        let mut piece_events = self
-            .ask(|response_sender| PieceManagerMessage::Subscribe { response_sender })
-            .await?;
-
         debug!("{}: request loop started", peer_addr(&self.peer));
         self.update_interest().await?;
 
@@ -213,7 +212,7 @@ impl RequestManager {
                 _ = availability_tick.tick() => {
                     self.availability_tick().await?;
                 },
-                event = piece_events.recv() => {
+                event = self.piece_events.recv() => {
                     match event {
                         Ok(event) => self.handle_piece_event(event).await?,
                         // Falling behind costs a duplicate block or an

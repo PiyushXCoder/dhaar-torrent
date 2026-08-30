@@ -86,7 +86,10 @@ impl PeerConnection {
     async fn run(&mut self) -> PeerConnectionResult<()> {
         let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
         self.handshake(&mut framed).await?;
-        let our_bitfield = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
+        // The subscription comes back with the bitfield rather than being
+        // taken later: anything completing in between would be missing from
+        // both, and the peer would never hear about it.
+        let snapshot = piece_manager_request(&mut self.piece_manager_channel_sender, |tx| {
             PieceManagerMessage::GetBitfield {
                 response_sender: tx,
             }
@@ -94,7 +97,7 @@ impl PeerConnection {
         .await?;
 
         framed
-            .send(WireItem::Message(Message::Bitfield(our_bitfield)))
+            .send(WireItem::Message(Message::Bitfield(snapshot.bitfield)))
             .await?;
 
         let peer_bitfield: Bitfield;
@@ -158,6 +161,7 @@ impl PeerConnection {
             self.piece_manager_channel_sender.clone(),
             incoming_receiver,
             outgoing_sender,
+            snapshot.events,
         );
 
         joinset.spawn(async move {

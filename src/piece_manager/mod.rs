@@ -127,7 +127,7 @@ where
                     response_sender.send(self.has_piece(piece_index)).unwrap();
                 }
                 PieceManagerMessage::GetBitfield { response_sender } => {
-                    response_sender.send(self.bitfield()).unwrap();
+                    response_sender.send(self.bitfield_snapshot()).unwrap();
                 }
                 PieceManagerMessage::IsInteresting {
                     bitfield,
@@ -172,9 +172,6 @@ where
                 PieceManagerMessage::TotalPieces { response_sender } => {
                     response_sender.send(self.total_pieces()).unwrap();
                 }
-                PieceManagerMessage::Subscribe { response_sender } => {
-                    response_sender.send(self.piece_events.subscribe()).unwrap();
-                }
             }
         }
     }
@@ -192,6 +189,15 @@ where
         match self.pieces.get(piece_index as usize) {
             Some(piece) => piece.complete,
             None => true,
+        }
+    }
+
+    /// The bitfield and a subscription taken together, in one turn of the
+    /// loop, so nothing can complete between the two.
+    fn bitfield_snapshot(&self) -> channel::BitfieldSnapshot {
+        channel::BitfieldSnapshot {
+            bitfield: self.bitfield(),
+            events: self.piece_events.subscribe(),
         }
     }
 

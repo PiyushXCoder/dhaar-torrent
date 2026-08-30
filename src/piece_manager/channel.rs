@@ -17,8 +17,10 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         response_sender: OneShotSender<bool>,
     },
+    /// What we hold, plus the feed of everything that completes from that
+    /// moment on. See `BitfieldSnapshot` for why they come together.
     GetBitfield {
-        response_sender: OneShotSender<Bitfield>,
+        response_sender: OneShotSender<BitfieldSnapshot>,
     },
     IsInteresting {
         bitfield: Bitfield,
@@ -60,12 +62,6 @@ pub enum PieceManagerMessage {
     TotalPieces {
         response_sender: OneShotSender<u32>,
     },
-    /// Asks for a feed of `PieceEvent`s. Connections subscribe for themselves
-    /// rather than being handed a receiver at construction, which keeps the
-    /// feed out of every signature between here and `main`.
-    Subscribe {
-        response_sender: OneShotSender<broadcast::Receiver<PieceEvent>>,
-    },
 }
 
 /// Something finished. The piece manager is the only writer; connections
@@ -77,6 +73,20 @@ pub enum PieceEvent {
     BlockComplete { piece_index: u32, block_index: u32 },
     /// A piece passed its hash check, so every peer can be told we have it.
     PieceComplete { piece_index: u32 },
+}
+
+/// A connection's opening view of what we have: the bitfield it announces to
+/// its peer, and the feed of everything completed after that.
+///
+/// Both are taken in one turn of the piece manager loop, because they only
+/// mean anything together. Fetched separately, a piece finishing in the gap
+/// lands in neither the bitfield already sent nor the feed not yet joined,
+/// and that peer never learns we hold it — there is no second bitfield in the
+/// protocol to correct it with.
+#[derive(Debug)]
+pub struct BitfieldSnapshot {
+    pub bitfield: Bitfield,
+    pub events: PieceEventReceiver,
 }
 
 pub type PieceEventSender = broadcast::Sender<PieceEvent>;
