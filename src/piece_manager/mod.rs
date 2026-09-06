@@ -36,7 +36,7 @@ where
     /// Republished whenever a piece verifies. Only this loop writes it, so
     /// every value it carries is of one instant.
     progress: watch::Sender<PieceProgress>,
-    info_hash: [u8; 20],
+    _info_hash: [u8; 20],
 }
 
 pub struct Piece {
@@ -122,7 +122,7 @@ where
             piece_events: channel::new_piece_event_channel(),
             stats,
             progress,
-            info_hash,
+            _info_hash: info_hash,
         }
     }
 
