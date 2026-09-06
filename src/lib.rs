@@ -88,9 +88,9 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
         let piece_writer = DiskPieceWriter::new(
             torrent.info.total_length(),
             &torrent.info.name,
-            torrent.info.length,
             &torrent.info.md5sum,
             &torrent.info.files,
+            torrent.info_hash,
         );
 
         Self::new(
@@ -173,6 +173,7 @@ where
             self.piece_writer,
             self.stats.clone(),
             self.progress_sender.clone(),
+            self.torrent.info_hash,
         );
         let peer_manager = PeerManager::new(
             self.peer_selection_strategy,
