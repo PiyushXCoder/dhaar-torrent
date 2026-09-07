@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 306" width="720" height="306" role="img" aria-label="Throughput of the disk and verification path compared with achieved download rates, on a logarithmic scale">
+  <title>Where the time goes</title>
+  <desc>Block read 1492 MB/s, piece verify 1176 MB/s, piece write 817 MB/s, loopback transfer 4.3 MB/s, live swarm 2.5 MB/s.</desc>
+
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+
+    <text x="16" y="26" font-size="15" font-weight="600" fill="#7d8590">Throughput by layer</text>
+    <text x="16" y="44" font-size="11.5" fill="#7d8590" opacity="0.85">Logarithmic scale — each gridline is 10× the one before it</text>
+
+    <!-- gridlines -->
+    <g stroke="#7d8590" stroke-opacity="0.22" stroke-width="1">
+      <line x1="210" y1="58" x2="210" y2="252"/>
+      <line x1="352.4" y1="58" x2="352.4" y2="252"/>
+      <line x1="494.8" y1="58" x2="494.8" y2="252"/>
+      <line x1="637.1" y1="58" x2="637.1" y2="252"/>
+    </g>
+    <g font-size="10.5" fill="#7d8590" opacity="0.75" text-anchor="middle">
+      <text x="210" y="268">1 MB/s</text>
+      <text x="352.4" y="268">10</text>
+      <text x="494.8" y="268">100</text>
+      <text x="637.1" y="268">1000</text>
+    </g>
+
+    <!-- what the machine can do -->
+    <g font-size="12" fill="#7d8590">
+      <text x="198" y="82" text-anchor="end">Block read (16 KiB)</text>
+      <text x="198" y="120" text-anchor="end">Piece verify, SHA-1</text>
+      <text x="198" y="158" text-anchor="end">Piece write + barrier</text>
+    </g>
+    <g fill="#58a6ff">
+      <rect x="210" y="66" width="451.9" height="24" rx="3"/>
+      <rect x="210" y="104" width="437.2" height="24" rx="3"/>
+      <rect x="210" y="142" width="414.6" height="24" rx="3"/>
+    </g>
+
+    <!-- what we actually achieve -->
+    <g font-size="12" fill="#7d8590">
+      <text x="198" y="196" text-anchor="end">Transfer, loopback</text>
+      <text x="198" y="234" text-anchor="end">Transfer, live swarm</text>
+    </g>
+    <g fill="#f0883e">
+      <rect x="210" y="180" width="90.2" height="24" rx="3"/>
+      <rect x="210" y="218" width="56.7" height="24" rx="3"/>
+    </g>
+
+    <!-- values -->
+    <g font-size="11.5" font-weight="600" fill="#7d8590">
+      <text x="671.9" y="82">1492 MB/s</text>
+      <text x="657.2" y="120">1176 MB/s</text>
+      <text x="634.6" y="158">817 MB/s</text>
+      <text x="310.2" y="196">4.3 MB/s</text>
+      <text x="276.7" y="234">2.5 MB/s</text>
+    </g>
+
+    <!-- legend -->
+    <g font-size="11" fill="#7d8590" opacity="0.9">
+      <rect x="210" y="286" width="9" height="9" rx="2" fill="#58a6ff"/>
+      <text x="225" y="294.5">what one machine can do</text>
+      <rect x="392" y="286" width="9" height="9" rx="2" fill="#f0883e"/>
+      <text x="407" y="294.5">what the client achieves</text>
+    </g>
+
+  </g>
+</svg>

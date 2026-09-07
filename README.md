@@ -43,6 +43,50 @@ runs a seeder and a leecher against each other. The seeder announces into an
 empty swarm so it has nobody to dial, which is what makes every byte that moves
 proof that an accepted connection carried it.
 
+### Benchmarks
+
+```sh
+cargo bench                      # divan; add a filter, e.g. cargo bench -- write_
+```
+
+<img src="assets/benchmarks.svg" alt="Throughput by layer: block read 1492 MB/s, piece verify 1176 MB/s, piece write 817 MB/s, loopback transfer 4.3 MB/s, live swarm 2.5 MB/s" width="720">
+
+**The disk and verification path**, measured against the real `DiskPieceWriter`
+rather than a model of it. Release build, medians over 100 samples.
+
+| what | median | throughput | notes |
+| --- | ---: | ---: | --- |
+| `read_block` | 10.97 µs | 1.49 GB/s | serving 16 KiB to a peer |
+| `write_block` | 15.29 µs | 1.07 GB/s | one block in from a peer, no barrier |
+| `set_bitfield` | 10.48 µs | — | the durability barrier, once per piece |
+| `hash_piece` | 222.7 µs | 1.18 GB/s | SHA-1 over 256 KiB, inline in the piece manager |
+| `write_whole_piece` | 320.9 µs | 817 MB/s | 16 blocks plus the barrier — a completed piece |
+
+**End to end**, the same client moving real bytes.
+
+| scenario | rate | conditions |
+| --- | ---: | --- |
+| loopback, one peer | ~4.3 MB/s | seeder and leecher on one machine, 64 MiB |
+| live swarm | ~2.5 MB/s | Ubuntu ISO, ~20 peers, ±20% between runs |
+
+Two things are worth reading off these together. The storage layer runs about
+**300× faster than the client can fill it**, so disk is not what limits a
+download and tuning it further buys nothing. And the loopback figure is the
+honest ceiling of the client's own machinery: with no network latency and a
+warm page cache it still only manages 4.3 MB/s, which works out to roughly
+3.8 ms of our own bookkeeping per 16 KiB block — four actor round-trips, all
+funnelling through the single-task piece manager.
+
+Distributions matter more than averages here. `read_block` has a median of
+11 µs and a worst case of 1.4 ms: most reads are served from the page cache and
+the occasional one is a real seek. That 100× spread is why the read path stays
+on a blocking thread pool, and why a mean would be the wrong summary.
+
+A word of caution about what these prove. A microbenchmark says a function got
+faster; only `scripts/test-inbound.sh` and a live swarm say a *download* got
+faster. The two have disagreed here before — the disk path once got 2.8× faster
+and download speed did not move at all.
+
 ### Architecture
 
 Components are independent tokio tasks talking over mpsc channels:
