@@ -1,63 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 306" width="720" height="306" role="img" aria-label="Throughput of the disk and verification path compared with achieved download rates, on a logarithmic scale">
-  <title>Where the time goes</title>
-  <desc>Block read 1492 MB/s, piece verify 1176 MB/s, piece write 817 MB/s, loopback transfer 4.3 MB/s, live swarm 2.5 MB/s.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 288" width="720" height="288" role="img" aria-label="Download rate compared with available link capacity: link allows 9.9 megabytes per second, the client's own ceiling is 4.3, a live swarm reaches 2.5, and a single HTTP stream gets 0.5">
+  <title>What we get versus what the link allows</title>
+  <desc>Link capacity 9.9 MB/s measured with 8 parallel HTTP streams. dhaar reaches 2.5 MB/s on a live swarm, against its own no-network ceiling of 4.3 MB/s. A single HTTP stream from the same mirror gets 0.5 MB/s.</desc>
 
   <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 
-    <text x="16" y="26" font-size="15" font-weight="600" fill="#7d8590">Throughput by layer</text>
-    <text x="16" y="44" font-size="11.5" fill="#7d8590" opacity="0.85">Logarithmic scale — each gridline is 10× the one before it</text>
+    <text x="16" y="26" font-size="15" font-weight="600" fill="#7d8590">What we get versus what the link allows</text>
+    <text x="16" y="44" font-size="11.5" fill="#7d8590" opacity="0.85">Same machine, same afternoon, megabytes per second</text>
 
     <!-- gridlines -->
-    <g stroke="#7d8590" stroke-opacity="0.22" stroke-width="1">
-      <line x1="210" y1="58" x2="210" y2="252"/>
-      <line x1="352.4" y1="58" x2="352.4" y2="252"/>
-      <line x1="494.8" y1="58" x2="494.8" y2="252"/>
-      <line x1="637.1" y1="58" x2="637.1" y2="252"/>
+    <g stroke="#7d8590" stroke-opacity="0.2" stroke-width="1">
+      <line x1="210" y1="58" x2="210" y2="216"/>
+      <line x1="304" y1="58" x2="304" y2="216"/>
+      <line x1="398" y1="58" x2="398" y2="216"/>
+      <line x1="492" y1="58" x2="492" y2="216"/>
+      <line x1="586" y1="58" x2="586" y2="216"/>
+      <line x1="680" y1="58" x2="680" y2="216"/>
     </g>
     <g font-size="10.5" fill="#7d8590" opacity="0.75" text-anchor="middle">
-      <text x="210" y="268">1 MB/s</text>
-      <text x="352.4" y="268">10</text>
-      <text x="494.8" y="268">100</text>
-      <text x="637.1" y="268">1000</text>
+      <text x="210" y="232">0</text>
+      <text x="304" y="232">2</text>
+      <text x="398" y="232">4</text>
+      <text x="492" y="232">6</text>
+      <text x="586" y="232">8</text>
+      <text x="680" y="232">10 MB/s</text>
     </g>
 
-    <!-- what the machine can do -->
+    <!-- the headroom we are not using -->
+    <rect x="327.5" y="58" width="337.8" height="158" fill="#f0883e" fill-opacity="0.07"/>
+    <line x1="327.5" y1="58" x2="327.5" y2="216" stroke="#f0883e" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="496" y="210" font-size="11" font-weight="600" fill="#f0883e" fill-opacity="0.85" text-anchor="middle">4x headroom unused</text>
+
+    <!-- labels -->
     <g font-size="12" fill="#7d8590">
-      <text x="198" y="82" text-anchor="end">Block read (16 KiB)</text>
-      <text x="198" y="120" text-anchor="end">Piece verify, SHA-1</text>
-      <text x="198" y="158" text-anchor="end">Piece write + barrier</text>
-    </g>
-    <g fill="#58a6ff">
-      <rect x="210" y="66" width="451.9" height="24" rx="3"/>
-      <rect x="210" y="104" width="437.2" height="24" rx="3"/>
-      <rect x="210" y="142" width="414.6" height="24" rx="3"/>
+      <text x="198" y="82" text-anchor="end">What the link allows</text>
+      <text x="198" y="120" text-anchor="end">dhaar, own ceiling</text>
+      <text x="198" y="158" text-anchor="end">dhaar, live swarm</text>
+      <text x="198" y="196" text-anchor="end">One HTTP stream</text>
     </g>
 
-    <!-- what we actually achieve -->
-    <g font-size="12" fill="#7d8590">
-      <text x="198" y="196" text-anchor="end">Transfer, loopback</text>
-      <text x="198" y="234" text-anchor="end">Transfer, live swarm</text>
-    </g>
-    <g fill="#f0883e">
-      <rect x="210" y="180" width="90.2" height="24" rx="3"/>
-      <rect x="210" y="218" width="56.7" height="24" rx="3"/>
-    </g>
+    <!-- bars -->
+    <rect x="210" y="66" width="465.3" height="24" rx="3" fill="#58a6ff"/>
+    <rect x="210" y="104" width="202.1" height="24" rx="3" fill="#f0883e" fill-opacity="0.4"/>
+    <rect x="210" y="142" width="117.5" height="24" rx="3" fill="#f0883e"/>
+    <rect x="210" y="180" width="23.5" height="24" rx="3" fill="#7d8590" fill-opacity="0.45"/>
 
     <!-- values -->
     <g font-size="11.5" font-weight="600" fill="#7d8590">
-      <text x="671.9" y="82">1492 MB/s</text>
-      <text x="657.2" y="120">1176 MB/s</text>
-      <text x="634.6" y="158">817 MB/s</text>
-      <text x="310.2" y="196">4.3 MB/s</text>
-      <text x="276.7" y="234">2.5 MB/s</text>
+      <text x="685.3" y="82">9.9</text>
+      <text x="422.1" y="120">4.3</text>
+      <text x="337.5" y="158">2.5</text>
+      <text x="243.5" y="196">0.5</text>
     </g>
 
-    <!-- legend -->
-    <g font-size="11" fill="#7d8590" opacity="0.9">
-      <rect x="210" y="286" width="9" height="9" rx="2" fill="#58a6ff"/>
-      <text x="225" y="294.5">what one machine can do</text>
-      <rect x="392" y="286" width="9" height="9" rx="2" fill="#f0883e"/>
-      <text x="407" y="294.5">what the client achieves</text>
+    <!-- caveats, said on the chart rather than only in prose -->
+    <g font-size="10.5" fill="#7d8590" opacity="0.8">
+      <text x="210" y="256">Link measured with 8 parallel streams to one mirror — a floor on capacity, not a ceiling.</text>
+      <text x="210" y="272">Own ceiling is two instances over loopback: no network, warm cache. Live swarm varies ±20%.</text>
     </g>
 
   </g>
