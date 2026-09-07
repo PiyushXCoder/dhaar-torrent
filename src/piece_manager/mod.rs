@@ -486,6 +486,20 @@ where
             return;
         }
         piece.ensure_initialized(piece_length);
+        // The same race one level down. A loser whose copy lands while the
+        // piece is still unfinished slips past the check above, and used to be
+        // written over the winner's bytes and counted as progress. It is just
+        // as wasted as the arrivals that come in after the piece is done. The
+        // registration goes with it: this peer will never deliver what it was
+        // asked for, and the block is already spoken for by whoever won.
+        if let Some(blocks) = piece.blocks.as_mut()
+            && let Some(block) = blocks.get_mut(block_index as usize)
+            && block.complete
+        {
+            block.requesters.retain(|p| *p != peer);
+            self.stats.add_wasted(block_data.len() as u64);
+            return;
+        }
         let Some(block_length) = piece.block_length else {
             return;
         };
@@ -615,5 +629,159 @@ where
 
     fn is_completed(&self) -> bool {
         self.pieces.iter().all(|piece| piece.complete)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_protocol::Bitfield;
+    use std::collections::HashMap;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    /// Records every write so a test can tell a real one from a duplicate.
+    #[derive(Default)]
+    struct MemoryWriter {
+        blocks: HashMap<(u32, u64), Vec<u8>>,
+        writes: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl piece_writer::PieceWriter for MemoryWriter {
+        type Error = std::io::Error;
+
+        async fn initialize(
+            &mut self,
+            _bitfield_length: u32,
+        ) -> Result<Option<Bitfield>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn read(
+            &self,
+            piece_index: u32,
+            piece_offset: u64,
+            _piece_length: u64,
+            length: u64,
+        ) -> Result<Vec<u8>, Self::Error> {
+            let mut out = self
+                .blocks
+                .get(&(piece_index, piece_offset))
+                .cloned()
+                .unwrap_or_default();
+            out.resize(length as usize, 0);
+            Ok(out)
+        }
+
+        async fn write(
+            &mut self,
+            piece_index: u32,
+            piece_offset: u64,
+            _piece_length: u64,
+            data: Vec<u8>,
+        ) -> Result<(), Self::Error> {
+            self.writes += 1;
+            self.blocks.insert((piece_index, piece_offset), data);
+            Ok(())
+        }
+
+        async fn set_bitfield(&mut self, _bitfield: Bitfield) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn finalize(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn peer(port: u16) -> Peer {
+        Peer {
+            peer_id: None,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+        }
+    }
+
+    /// One piece of two blocks. The hash is deliberately wrong: these tests
+    /// stop short of completing the piece, so it is never checked.
+    fn manager() -> PieceManager<std::io::Error, MemoryWriter> {
+        let piece_length = BLOCK_SIZE * 2;
+        PieceManager::new(
+            &ByteBuf::from(vec![0u8; 20]),
+            piece_length,
+            piece_length,
+            MemoryWriter::default(),
+            Arc::new(DownloadStats::default()),
+            watch::Sender::new(PieceProgress::default()),
+            [0u8; 20],
+        )
+    }
+
+    /// Endgame sends the same block to several peers. The copy that loses the
+    /// race must not overwrite the winner's bytes, and must be counted.
+    #[tokio::test]
+    async fn duplicate_block_is_counted_and_not_rewritten() {
+        let mut manager = manager();
+        let winner = vec![0xAA; BLOCK_SIZE as usize];
+        let loser = vec![0xBB; BLOCK_SIZE as usize];
+
+        manager.receive_block(0, 0, winner.clone(), peer(1)).await;
+        assert_eq!(manager.piece_writer.writes, 1);
+        assert_eq!(manager.stats.wasted_bytes(), 0);
+
+        manager.receive_block(0, 0, loser, peer(2)).await;
+
+        assert_eq!(
+            manager.piece_writer.writes, 1,
+            "the losing copy was written to disk again"
+        );
+        assert_eq!(
+            manager.piece_writer.blocks.get(&(0, 0)),
+            Some(&winner),
+            "the losing copy overwrote the winner's bytes"
+        );
+        assert_eq!(
+            manager.stats.wasted_bytes(),
+            BLOCK_SIZE,
+            "the losing copy was not counted as wasted"
+        );
+    }
+
+    /// Control for the guard above: it must not swallow a block that nobody
+    /// has delivered yet.
+    #[tokio::test]
+    async fn first_copy_of_a_block_is_written() {
+        let mut manager = manager();
+        manager
+            .receive_block(0, 1, vec![0xCC; BLOCK_SIZE as usize], peer(1))
+            .await;
+
+        assert_eq!(manager.piece_writer.writes, 1);
+        assert_eq!(manager.stats.wasted_bytes(), 0);
+        assert!(manager.pieces[0].blocks.as_ref().unwrap()[1].complete);
+    }
+
+    /// The early return must still clear the loser's claim: it will never
+    /// deliver, and the block already has its data.
+    #[tokio::test]
+    async fn duplicate_block_drops_the_losing_registration() {
+        let mut manager = manager();
+        let loser = peer(2);
+        manager.pieces[0].ensure_initialized(BLOCK_SIZE * 2);
+        manager.pieces[0].blocks.as_mut().unwrap()[0]
+            .requesters
+            .push(loser);
+
+        manager
+            .receive_block(0, 0, vec![0xAA; BLOCK_SIZE as usize], peer(1))
+            .await;
+        manager
+            .receive_block(0, 0, vec![0xBB; BLOCK_SIZE as usize], loser)
+            .await;
+
+        let blocks = manager.pieces[0].blocks.as_ref().unwrap();
+        assert!(
+            !blocks[0].requesters.contains(&loser),
+            "the loser is still registered on a block it will never deliver"
+        );
     }
 }
