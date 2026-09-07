@@ -20,4 +20,7 @@ pub struct CliArgsConfig {
 
     #[arg(short, long)]
     pub config_file: Option<PathBuf>,
+
+    #[arg(short, long, default_value_t = 6881)]
+    pub listening_port: u16,
 }

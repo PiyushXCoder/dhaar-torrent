@@ -36,6 +36,7 @@ where
     /// Republished whenever a piece verifies. Only this loop writes it, so
     /// every value it carries is of one instant.
     progress: watch::Sender<PieceProgress>,
+    _info_hash: [u8; 20],
 }
 
 pub struct Piece {
@@ -100,6 +101,7 @@ where
         piece_writer: W,
         stats: Arc<DownloadStats>,
         progress: watch::Sender<PieceProgress>,
+        info_hash: [u8; 20],
     ) -> Self {
         let piceces = piece_hashes
             .chunks(20)
@@ -120,6 +122,7 @@ where
             piece_events: channel::new_piece_event_channel(),
             stats,
             progress,
+            _info_hash: info_hash,
         }
     }
 
@@ -127,7 +130,17 @@ where
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
-        self.piece_writer.initialize().await.unwrap();
+        let bitfield = self
+            .piece_writer
+            .initialize(self.bitfield().0.len() as u32)
+            .await
+            .unwrap();
+        if let Some(bitfield) = bitfield {
+            for (index, piece) in self.pieces.iter_mut().enumerate() {
+                piece.complete = bitfield.has_piece(index as u32);
+            }
+        }
+
         self.stats
             .set_totals(self.total_pieces(), self.total_length);
         self.publish_progress();
@@ -521,6 +534,10 @@ where
             }
             debug!("{}: piece complete, hash verified", piece_index);
             piece.complete = true;
+            self.piece_writer
+                .set_bitfield(self.bitfield())
+                .await
+                .unwrap();
             self.stats.piece_verified(piece_length);
             self.publish_progress();
             let _ = self

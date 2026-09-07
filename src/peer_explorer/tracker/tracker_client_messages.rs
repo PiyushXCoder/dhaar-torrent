@@ -25,11 +25,11 @@ pub struct TrackerAnnounceQuery {
 }
 
 impl TrackerAnnounceQuery {
-    pub fn new(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Self {
+    pub fn new(info_hash: &[u8; 20], peer_id: &[u8; 20], port: u16) -> Self {
         TrackerAnnounceQuery {
             info_hash: *info_hash,
             peer_id: *peer_id,
-            port: 6889,
+            port,
             uploaded: 0,
             downloaded: 0,
             left: 0,

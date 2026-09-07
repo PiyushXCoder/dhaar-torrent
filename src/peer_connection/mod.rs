@@ -13,7 +13,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, select, sync::oneshot, task::JoinSet, time};
 use tokio_util::codec::Framed;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 pub mod channels;
 pub mod error;
@@ -21,7 +21,8 @@ pub mod request_manager;
 
 pub struct PeerConnection {
     pub stats: Arc<DownloadStats>,
-    pub peer: Option<Peer>,
+    pub peer: Peer,
+    pub is_outbound: bool,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub stream: Option<TcpStream>,
     pub info_hash: [u8; 20],
@@ -48,7 +49,8 @@ impl PeerConnection {
 
         Ok(PeerConnection {
             stats,
-            peer: Some(peer),
+            peer,
+            is_outbound: true,
             piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
@@ -58,6 +60,7 @@ impl PeerConnection {
 
     pub async fn from_stream(
         stream: TcpStream,
+        address: SocketAddr,
         piece_manager_channel_sender: PieceManagerChannelSender,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
@@ -65,7 +68,11 @@ impl PeerConnection {
     ) -> Self {
         PeerConnection {
             stats,
-            peer: None,
+            peer: Peer {
+                peer_id: None,
+                address: address,
+            },
+            is_outbound: false,
             piece_manager_channel_sender,
             stream: Some(stream),
             info_hash: *info_hash,
@@ -78,11 +85,11 @@ impl PeerConnection {
     pub async fn start(mut self) {
         match self.run().await {
             Ok(()) | Err(PeerConnectionError::PeerDisconnected) => {
-                debug!("{}: connection ended", peer_addr(&self.peer));
+                debug!("{}: connection ended", peer_addr_direct(&self.peer));
             }
-            Err(e) => warn!("{}: connection ended: {}", peer_addr(&self.peer), e),
+            Err(e) => warn!("{}: connection ended: {}", peer_addr_direct(&self.peer), e),
         }
-        close(&self.peer);
+        close(&Some(self.peer));
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
@@ -155,7 +162,7 @@ impl PeerConnection {
         });
 
         let request_manager = request_manager::RequestManager::new(
-            self.peer.take(),
+            Some(self.peer),
             self.info_hash,
             self.peer_id,
             peer_bitfield,
@@ -194,7 +201,7 @@ impl PeerConnection {
         &mut self,
         framed: &mut Framed<TcpStream, WireCodec>,
     ) -> error::PeerConnectionResult<()> {
-        if self.peer.is_some() {
+        if self.is_outbound {
             self.handshake_outbound(framed).await?;
         } else {
             self.handshake_inbound(framed).await?;
@@ -220,24 +227,20 @@ impl PeerConnection {
                             if info_hash != self.info_hash {
                                 warn!(
                                     "{}: handshake failed, info_hash mismatch",
-                                    peer_addr(&self.peer)
+                                    peer_addr_direct(&self.peer)
                                 );
                                 return Err(error::PeerConnectionError::InfoHashMismatch);
                             }
                         }
                         Some(Ok(WireItem::Handshake(handshake))) => {
-                            let Some(peer) = self.peer.as_mut() else {
-                                error!("Handshake failed: outbound connection missing peer");
-                                return Err(error::PeerConnectionError::PeerNotFound);
-                            };
-                            peer.peer_id = Some(handshake.peer_id);
-                            debug!("Outbound handshake complete with {}", peer.address);
+                            self.peer.peer_id = Some(handshake.peer_id);
+                            debug!("Outbound handshake complete with {}", self.peer.address);
                             return Ok(());
                         }
                         _ => {
                             warn!(
                                 "{}: handshake failed, unexpected message or connection closed",
-                                peer_addr(&self.peer)
+                                peer_addr_direct(&self.peer)
                             );
                             return Err(error::PeerConnectionError::UnexpectedMessage);
                         }
@@ -262,7 +265,7 @@ impl PeerConnection {
                             if info_hash != self.info_hash {
                                 warn!(
                                     "{}: handshake failed, unknown info_hash",
-                                    peer_addr(&self.peer)
+                                    peer_addr_direct(&self.peer)
                                 );
                                 return Err(error::PeerConnectionError::InfoHashMismatch);
                             }
@@ -273,17 +276,15 @@ impl PeerConnection {
                         }
                         Some(Ok(WireItem::Handshake(handshake))) => {
                             let addr = framed.get_ref().peer_addr()?;
-                            self.peer = Some(Peer {
-                                peer_id: Some(handshake.peer_id),
-                                address: SocketAddr::new(addr.ip(), addr.port()),
-                            });
+                            self.peer.peer_id = Some(handshake.peer_id);
+                            self.peer.address = SocketAddr::new(addr.ip(), addr.port());
                             debug!("Inbound handshake complete with {}", addr);
                             return Ok(());
                         }
                         _ => {
                             warn!(
                                 "{}: handshake failed, unexpected message or connection closed",
-                                peer_addr(&self.peer)
+                                peer_addr_direct(&self.peer)
                             );
                             return Err(error::PeerConnectionError::UnexpectedMessage);
                         }
@@ -308,6 +309,10 @@ fn peer_addr(peer: &Option<Peer>) -> String {
         Some(peer) => format!("{}", peer.address),
         None => "unknown".to_string(),
     }
+}
+
+fn peer_addr_direct(peer: &Peer) -> String {
+    format!("{}", peer.address)
 }
 
 async fn piece_manager_request<T>(

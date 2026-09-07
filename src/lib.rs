@@ -55,6 +55,7 @@ where
 {
     torrent: Torrent,
     peer_id: [u8; 20],
+    listening_port: u16,
     piece_writer: W,
     peer_selection_strategy: S,
     peer_sources: Vec<Box<dyn PeerSource + Send>>,
@@ -67,14 +68,21 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
     /// Reads a `.torrent` file and takes the usual defaults: written to disk
     /// beside the current directory, peers from the trackers the file names,
     /// failed peers retried after a delay.
-    pub fn from_torrent_file(path: &Path) -> Result<Self> {
-        Ok(Self::from_torrent(TorrentFileParser::parse_from_file_path(
-            path,
-        )?))
+    pub fn from_torrent_file(path: &Path, listening_port: u16) -> Result<Self> {
+        Ok(Self::from_torrent_with_port(
+            TorrentFileParser::parse_from_file_path(path)?,
+            listening_port,
+        ))
     }
 
-    /// As [`Download::from_torrent_file`], for metadata already in hand.
-    pub fn from_torrent(torrent: Torrent) -> Self {
+    pub fn from_torrent_file_with_port(path: &Path, listening_port: u16) -> Result<Self> {
+        Ok(Self::from_torrent_with_port(
+            TorrentFileParser::parse_from_file_path(path)?,
+            listening_port,
+        ))
+    }
+
+    pub fn from_torrent_with_port(torrent: Torrent, listening_port: u16) -> Self {
         let peer_id = generate_random_peer_id();
         // Built first: the tracker announces these figures, so it needs the
         // same counters the connections will be writing to.
@@ -84,13 +92,14 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
             &torrent.info_hash,
             &peer_id,
             stats.clone(),
+            listening_port,
         );
         let piece_writer = DiskPieceWriter::new(
             torrent.info.total_length(),
             &torrent.info.name,
-            torrent.info.length,
             &torrent.info.md5sum,
             &torrent.info.files,
+            torrent.info_hash,
         );
 
         Self::new(
@@ -100,6 +109,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
             RetryAfterDelayPeerSelectionStrategy::new(),
             vec![Box::new(tracker_manager)],
             stats,
+            listening_port,
         )
     }
 }
@@ -123,10 +133,12 @@ where
         peer_selection_strategy: S,
         peer_sources: Vec<Box<dyn PeerSource + Send>>,
         stats: Arc<DownloadStats>,
+        listening_port: u16,
     ) -> Self {
         Self {
             torrent,
             peer_id,
+            listening_port,
             piece_writer,
             peer_selection_strategy,
             peer_sources,
@@ -173,12 +185,14 @@ where
             self.piece_writer,
             self.stats.clone(),
             self.progress_sender.clone(),
+            self.torrent.info_hash,
         );
         let peer_manager = PeerManager::new(
             self.peer_selection_strategy,
             &self.torrent.info_hash,
             &self.peer_id,
             self.stats.clone(),
+            self.listening_port,
         );
 
         let status = self.status_sender.subscribe();
@@ -201,6 +215,10 @@ where
             status,
             tasks,
         }
+    }
+
+    pub fn set_listening_port(&mut self, port: u16) {
+        self.listening_port = port;
     }
 
     /// Runs until the first actor stops. Any one of them stopping means the

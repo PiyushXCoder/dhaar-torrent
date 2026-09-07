@@ -13,13 +13,14 @@ async fn main() {
         }
     };
 
-    let download = match Download::from_torrent_file(&config.torrent_file) {
-        Ok(download) => download,
-        Err(e) => {
-            error!("{e:#}");
-            return;
-        }
-    };
+    let download =
+        match Download::from_torrent_file_with_port(&config.torrent_file, config.listening_port) {
+            Ok(download) => download,
+            Err(e) => {
+                error!("{e:#}");
+                return;
+            }
+        };
 
     // Subscribed before the download starts, so nothing is missed between
     // spawning the actors and the first sample.
