@@ -16,6 +16,14 @@ pub mod peer_selection_strategy;
 
 const MAX_PEERS: usize = 50;
 
+/// A connection task under supervision, and which side opened it. Only a peer
+/// we dialled can be dialled again: an inbound peer is known by the ephemeral
+/// port it called from, and nothing is listening there once it hangs up.
+struct Connection {
+    peer: Peer,
+    outbound: bool,
+}
+
 pub struct PeerManager<S>
 where
     S: peer_selection_strategy::PeerSelectionStrategy + Sync + Send + 'static,
@@ -84,9 +92,9 @@ where
         // the peer to requeue — would be lost. Watching the tasks themselves
         // catches every ending, including the ones that skip all our code.
         let mut connections: JoinSet<()> = JoinSet::new();
-        // A panicking task returns nothing, so the peer it was dialling has to
-        // be recoverable from the task id alone.
-        let mut dialled: HashMap<task::Id, Peer> = HashMap::new();
+        // A panicking task returns nothing, so what it was doing has to be
+        // recoverable from the task id alone.
+        let mut live: HashMap<task::Id, Connection> = HashMap::new();
         let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(
             Ipv4Addr::UNSPECIFIED,
             self.listening_port,
@@ -101,14 +109,16 @@ where
                         Ok((id, ())) => (id, false),
                         Err(e) => (e.id(), e.is_panic()),
                     };
-                    let Some(peer) = dialled.remove(&id) else {
+                    let Some(connection) = live.remove(&id) else {
                         continue;
                     };
                     if panicked {
-                        error!("{}: connection task panicked", peer.address);
+                        error!("{}: connection task panicked", connection.peer.address);
                     }
                     self.stats.peer_disconnected();
-                    self.peer_slection_strategy.push(peer, true);
+                    if connection.outbound {
+                        self.peer_slection_strategy.push(connection.peer, true);
+                    }
                 }
                 Some(msg) = peer_explorer_channel_receiver.recv() => {
                     match msg {
@@ -144,7 +154,13 @@ where
                         )
                         .await.start()
                     );
-                    dialled.insert(handle.id(), peer);
+                    live.insert(
+                        handle.id(),
+                        Connection {
+                            peer,
+                            outbound: false,
+                        },
+                    );
                 }
                 Some(attempt) = self.peer_slection_strategy.pop(),
                     if !self.download_completed
@@ -183,7 +199,13 @@ where
                             Err(e) => warn!("{}", e),
                         }
                     });
-                    dialled.insert(handle.id(), peer);
+                    live.insert(
+                        handle.id(),
+                        Connection {
+                            peer,
+                            outbound: true,
+                        },
+                    );
                 }
             }
         }
