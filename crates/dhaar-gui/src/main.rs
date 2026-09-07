@@ -20,6 +20,14 @@ use tokio::runtime::Runtime;
 /// second, so asking more often only repeats values.
 const REFRESH: Duration = Duration::from_secs(1);
 
+/// The port the peer manager binds for incoming connections. Hardcoded, which
+/// means only one download at a time can actually listen: the second bind of
+/// the same port fails, and it fails inside a spawned task, so that download
+/// simply never accepts a peer rather than reporting anything. Fine while this
+/// is a one-torrent-at-a-time client; the fix is a single listener owned by
+/// `Client` and shared across downloads.
+const LISTENING_PORT: u16 = 6881;
+
 #[derive(Debug, Clone)]
 enum Message {
     AddTorrent,
@@ -57,13 +65,13 @@ impl Client {
         // Paths on the command line start immediately; the picker is the
         // normal route, this is the convenient one while working on it.
         for path in env::args().skip(1).map(PathBuf::from) {
-            client.add(&path);
+            client.add(&path, LISTENING_PORT);
         }
         client
     }
 
-    fn add(&mut self, path: &Path) {
-        let download = match Download::from_torrent_file(path) {
+    fn add(&mut self, path: &Path, listening_port: u16) {
+        let download = match Download::from_torrent_file(path, listening_port) {
             Ok(download) => download,
             Err(e) => {
                 self.error = Some(format!("Could not open {}: {e}", path.display()));
@@ -121,7 +129,7 @@ impl Client {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddTorrent => return Task::perform(pick_torrent(), Message::TorrentPicked),
-            Message::TorrentPicked(Some(path)) => self.add(&path),
+            Message::TorrentPicked(Some(path)) => self.add(&path, LISTENING_PORT),
             Message::TorrentPicked(None) => {}
             Message::Remove(index) => self.remove(index),
             // Nothing to store: the status is read straight from the handles

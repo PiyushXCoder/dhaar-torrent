@@ -7,6 +7,7 @@ use crate::{
     },
     piece_manager::channel::{PieceManagerChannelSender, PieceManagerMessage},
 };
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::{collections::HashMap, sync::Arc};
 use tokio::{sync::oneshot, task, task::JoinSet};
 use tracing::{error, warn};
@@ -27,6 +28,7 @@ where
     /// for status sees the same number this loop makes decisions on.
     stats: Arc<DownloadStats>,
     download_completed: bool,
+    listening_port: u16,
 }
 
 impl<S> PeerManager<S>
@@ -38,6 +40,7 @@ where
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
+        listening_port: u16,
     ) -> Self {
         Self {
             peer_slection_strategy,
@@ -45,6 +48,7 @@ where
             peer_id: *peer_id,
             stats,
             download_completed: false,
+            listening_port,
         }
     }
 
@@ -83,6 +87,12 @@ where
         // A panicking task returns nothing, so the peer it was dialling has to
         // be recoverable from the task id alone.
         let mut dialled: HashMap<task::Id, Peer> = HashMap::new();
+        let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            self.listening_port,
+        ))
+        .await
+        .unwrap();
 
         loop {
             tokio::select! {
@@ -106,6 +116,30 @@ where
                             self.peer_slection_strategy.push(peer, false);
                         }
                     }
+                }
+                Ok((stream, address)) = listener.accept() => {
+                    let peer = Peer {
+                        peer_id: None,
+                        address,
+                    };
+                    let stats = self.stats.clone();
+                    let piece_manager_channel_sender = piece_manager_channel_sender.clone();
+                    let info_hash = self.info_hash;
+                    let peer_id = self.peer_id;
+
+
+                    let handle = connections.spawn(
+                        PeerConnection::from_stream(
+                            stream,
+                            address,
+                            piece_manager_channel_sender,
+                            &info_hash,
+                            &peer_id,
+                            stats,
+                        )
+                        .await.start()
+                    );
+                    dialled.insert(handle.id(), peer);
                 }
                 Some(attempt) = self.peer_slection_strategy.pop(),
                     if !self.download_completed

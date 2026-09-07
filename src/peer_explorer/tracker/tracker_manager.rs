@@ -19,6 +19,7 @@ pub struct TrackerManager {
     announce_urls: Vec<String>,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
+    port: u16,
     /// Read fresh for every announce. Trackers use these figures to decide
     /// who to hand out and to count seeders, so announcing zeroes forever
     /// makes us look like a peer that takes and never gives.
@@ -31,11 +32,13 @@ impl TrackerManager {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
+        port: u16,
     ) -> Self {
         Self {
             announce_urls,
             info_hash: *info_hash,
             peer_id: *peer_id,
+            port,
             stats,
         }
     }
@@ -69,7 +72,7 @@ impl PeerSource for TrackerManager {
             warn!("No tracker URLs in the torrent, this source will find no peers");
         }
 
-        let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id);
+        let query = TrackerAnnounceQuery::new(&self.info_hash, &self.peer_id, self.port);
         let stats = self.stats.clone();
         let join_handle = tokio::spawn(async move {
             announce_tracker(
