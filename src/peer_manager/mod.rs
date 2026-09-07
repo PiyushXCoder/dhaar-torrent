@@ -127,6 +127,11 @@ where
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
 
+                    // Counted here, not in the connection task, because the
+                    // join arm decrements for every id it finds in `dialled`
+                    // and cannot tell which side dialled. An id that goes in
+                    // uncounted still takes the tally down on its way out.
+                    self.stats.peer_connected();
 
                     let handle = connections.spawn(
                         PeerConnection::from_stream(
