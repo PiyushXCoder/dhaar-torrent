@@ -49,43 +49,60 @@ proof that an accepted connection carried it.
 cargo bench                      # divan; add a filter, e.g. cargo bench -- write_
 ```
 
-<img src="assets/benchmarks.svg" alt="Throughput by layer: block read 1492 MB/s, piece verify 1176 MB/s, piece write 817 MB/s, loopback transfer 4.3 MB/s, live swarm 2.5 MB/s" width="720">
+<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, the client's own no-network ceiling is 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
 
-**The disk and verification path**, measured against the real `DiskPieceWriter`
-rather than a model of it. Release build, medians over 100 samples.
+The number that matters is how much of the link we actually use, so that is what
+the client is measured against.
 
-| what | median | throughput | notes |
-| --- | ---: | ---: | --- |
-| `read_block` | 10.97 µs | 1.49 GB/s | serving 16 KiB to a peer |
-| `write_block` | 15.29 µs | 1.07 GB/s | one block in from a peer, no barrier |
-| `set_bitfield` | 10.48 µs | — | the durability barrier, once per piece |
-| `hash_piece` | 222.7 µs | 1.18 GB/s | SHA-1 over 256 KiB, inline in the piece manager |
-| `write_whole_piece` | 320.9 µs | 817 MB/s | 16 blocks plus the barrier — a completed piece |
-
-**End to end**, the same client moving real bytes.
-
-| scenario | rate | conditions |
+| | rate | how it was measured |
 | --- | ---: | --- |
-| loopback, one peer | ~4.3 MB/s | seeder and leecher on one machine, 64 MiB |
-| live swarm | ~2.5 MB/s | Ubuntu ISO, ~20 peers, ±20% between runs |
+| What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
+| dhaar, own ceiling | 4.3 MB/s | seeder and leecher on one machine over loopback, 64 MiB |
+| dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, varies ±20% between runs |
+| One HTTP stream | 0.5 MB/s | single request to the same mirror |
 
-Two things are worth reading off these together. The storage layer runs about
-**300× faster than the client can fill it**, so disk is not what limits a
-download and tuning it further buys nothing. And the loopback figure is the
-honest ceiling of the client's own machinery: with no network latency and a
-warm page cache it still only manages 4.3 MB/s, which works out to roughly
-3.8 ms of our own bookkeeping per 16 KiB block — four actor round-trips, all
-funnelling through the single-task piece manager.
+**We use about a quarter of the bandwidth available.** Beating a single HTTP
+stream 5x is BitTorrent working as intended — many peers outrunning one server —
+but 2.5 against 9.9 is four times the throughput sitting unclaimed.
 
-Distributions matter more than averages here. `read_block` has a median of
-11 µs and a worst case of 1.4 ms: most reads are served from the page cache and
-the occasional one is a real seek. That 100× spread is why the read path stays
-on a blocking thread pool, and why a mean would be the wrong summary.
+The loopback row is what rules out the network as the culprit. Two instances on
+one machine, no latency, warm page cache, and it still stops at 4.3 MB/s. That
+is the client's own ceiling, and it is *below* what the link offers, so the
+bottleneck is our own bookkeeping rather than anything outside the process. It
+works out to roughly 3.8 ms per 16 KiB block, spent on four actor round-trips
+that all funnel through the single-task piece manager.
 
-A word of caution about what these prove. A microbenchmark says a function got
-faster; only `scripts/test-inbound.sh` and a live swarm say a *download* got
-faster. The two have disagreed here before — the disk path once got 2.8× faster
-and download speed did not move at all.
+Two design decisions account for it. A peer may hold only one piece at a time,
+which caps its outstanding requests at one piece's worth of blocks — sixteen
+here — so per-peer throughput is `piece_length / RTT` no matter how many peers
+connect. And every block costs those four round-trips through one task, which is
+the same saturation that makes the piece-event broadcast overflow under load.
+
+#### Component costs
+
+None of these are the limit, which is the useful thing to know about them. They
+are measured against the real `DiskPieceWriter` rather than a model of it, in a
+release build, medians over 100 samples.
+
+| what | median | throughput |
+| --- | ---: | ---: |
+| `read_block` | 10.97 µs | 1.49 GB/s |
+| `write_block` | 15.29 µs | 1.07 GB/s |
+| `set_bitfield` | 10.48 µs | — |
+| `hash_piece` | 222.7 µs | 1.18 GB/s |
+| `write_whole_piece` | 320.9 µs | 817 MB/s |
+
+Storage runs some three hundred times faster than the client can fill it, so
+tuning it further buys nothing. Distributions matter more than averages here:
+`read_block` has a median of 11 µs and a worst case of 1.4 ms, because most
+reads are served from the page cache and the occasional one is a real seek. That
+spread is why the read path stays on a blocking thread pool.
+
+A microbenchmark only ever says a *function* got faster. Whether a *download*
+got faster is a separate question with a separate answer — the disk path here
+once got 2.8x faster while download speed did not move at all. Benchmark
+figures also shift about 2x with background load, so re-run on a quiet machine
+before reading anything into a difference.
 
 ### Architecture
 
