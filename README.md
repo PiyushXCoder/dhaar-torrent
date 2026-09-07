@@ -16,14 +16,32 @@ The whole thing is a library. `Download` owns the wiring, hands back a handle, a
 
 Connections keep themselves alive: a keep-alive goes out after 100s of silence, and one arriving resets the idle timer, which is why that timer is 150s — longer than the two minutes peers conventionally leave between keep-alives, so a peer with nothing to say is no longer dropped for saying nothing.
 
-Still missing: resume across restarts, seeding, inbound connections, web seeds, DHT, UDP trackers, and magnet links.
+Peers can reach us now, not just the other way round. The peer manager binds a TCP listener on a port you pick (`--listening-port`, default 6881) and supervises accepted connections alongside dialled ones; that same port is what gets announced to the tracker. A download also survives a restart: the partial `.dhaar` store is read back on start and its verified pieces are kept, which is what lets an instance come up already seeding.
+
+Still missing: web seeds, DHT, UDP trackers, and magnet links.
 
 ### Known rough edges
 
 - **Trackers are the only peer source.** `announce` is optional and `announce-list` alone is enough, but a torrent that ships neither — Arch Linux's ISO torrent, for example, which carries only a BEP 19 `url-list` of web seeds — parses fine and then finds no peers at all. It logs a warning and sits idle.
-- **Outbound only.** There is no TCP listener, so no peer can ever connect to us. Blocks are served to peers we dialled, but once a download completes the peer manager stops dialling, so in practice nothing is ever seeded.
-- **Finishing a download ends any chance of seeding it.** `finalize` splits the `.dhaar` file into the real layout and deletes it, but every read still goes through that file, so a peer asking for a block we hold gets nothing. Confirmed against a live swarm.
-- **Nothing survives a restart.** A partial `.dhaar` file is not read back, so an interrupted download starts from zero.
+- **A resumed store is invisible to the tracker.** Pieces recovered from disk set the progress counters but never pass through `piece_verified`, which is what `verified_bytes` counts. An instance that comes up complete therefore announces `left` as the full torrent length and never leaves the `Downloading` state, so trackers and peers read it as having nothing.
+- **Inbound connections are uncapped.** The 50-connection limit is checked before dialling out, but nothing bounds how many connections we accept, and accepted peers now draw on the same budget — enough incoming can crowd out dialling entirely.
+- **An inbound peer cannot be reconnected to.** A peer that dials us is known only by the ephemeral source port it called from, which nothing listens on. That address is deliberately not queued for retry, and the base protocol carries no way to learn the real one — that needs the BEP 10 extended handshake.
+- **Torrents without a `creation date` are rejected.** The field is `Option`, but pairing `Option` with a `deserialize_with` and no `#[serde(default)]` makes serde require it anyway, so a perfectly valid file fails to parse.
+- **A failed `accept()` spins.** The listener arm matches on `Ok(..)`, so an error falls through the pattern and the branch re-arms immediately; a persistent failure like running out of file descriptors becomes a busy loop.
+
+### Testing
+
+`cargo test` covers the codec and parsing. Behaviour that only shows up between
+two processes has its own script:
+
+```sh
+scripts/test-inbound.sh          # --keep to retain the logs
+```
+
+It stands up a private tracker, builds a torrent and a pre-completed store, and
+runs a seeder and a leecher against each other. The seeder announces into an
+empty swarm so it has nobody to dial, which is what makes every byte that moves
+proof that an accepted connection carried it.
 
 ### Architecture
 
@@ -66,9 +84,13 @@ Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/
 - [x] Periodic keep-alive messages — sent into silence only, and inbound ones no longer swallowed by the decoder
 - [x] Supervise connection tasks — the peer manager watches the tasks rather than waiting to be told, so a panic no longer leaks the slot
 - [ ] `stopped` tracker event on shutdown
-- [ ] Inbound connections — TCP listener (`PeerConnection::from_stream` exists, nothing calls it)
+- [ ] Count resumed pieces as verified, so `left` and the seeding state are right after a restart
+- [ ] Cap inbound connections, and reserve part of the budget so incoming cannot starve dialling
+- [ ] Identify peers by `peer_id` — mutual dials currently make two connections to one client
+- [ ] Handle `accept()` errors instead of letting the `select!` arm re-arm on failure
+- [x] Inbound connections — TCP listener on a configurable port, accepted connections supervised alongside dialled ones
 - [ ] Web seeds (BEP 19) — HTTP `url-list` sources for trackerless torrents
-- [ ] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
+- [x] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
 - [ ] Per-peer status — the library aggregates today and keeps no peer registry
 - [ ] Pause and resume a running download
 - [ ] Skip announce URLs we cannot speak — `udp://` and `wss://` go to the HTTP client and fail forever (144 warnings in 90s on a WebTorrent-made torrent)
@@ -76,7 +98,7 @@ Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/
 - [ ] Tracker communication — UDP tracker (BEP 15)
 - [ ] DHT (BEP 5) — decentralized peer discovery
 - [ ] Magnet links (BEP 9/10) — metadata exchange
-- [ ] Seeding — verified pieces cannot be served once a download finishes: reads go through the `.dhaar` file that `finalize` deletes, so `read_block` returns nothing
+- [x] Seeding — `finalize` copies rather than moves, so the `.dhaar` store outlives completion and blocks can still be read out of it
 - [ ] Message Stream Encryption (BEP 8) — WebTorrent opens encrypted handshakes by default, so its outgoing connections cannot talk to us at all
 - [ ] Rate limiting
 - [ ] `models/` module — shared domain types
