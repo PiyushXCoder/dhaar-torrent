@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 288" width="720" height="288" role="img" aria-label="Download rate compared with available link capacity: link allows 9.9 megabytes per second, the client's own ceiling is 4.3, a live swarm reaches 2.5, and a single HTTP stream gets 0.5">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 288" width="720" height="288" role="img" aria-label="Download rate compared with available link capacity: link allows 9.9 megabytes per second, one dhaar peer gets 4.3, a live swarm reaches 2.5, and a single HTTP stream gets 0.5">
   <title>What we get versus what the link allows</title>
-  <desc>Link capacity 9.9 MB/s measured with 8 parallel HTTP streams. dhaar reaches 2.5 MB/s on a live swarm, against its own no-network ceiling of 4.3 MB/s. A single HTTP stream from the same mirror gets 0.5 MB/s.</desc>
+  <desc>Link capacity 9.9 MB/s measured with 8 parallel HTTP streams. dhaar reaches 2.5 MB/s on a live swarm, against 4.3 MB/s from a single peer over loopback. Peer count is the lever: 32 loopback peers reach 97 MB/s. A single HTTP stream from the same mirror gets 0.5 MB/s.</desc>
 
   <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 
@@ -33,7 +33,7 @@
     <!-- labels -->
     <g font-size="12" fill="#7d8590">
       <text x="198" y="82" text-anchor="end">What the link allows</text>
-      <text x="198" y="120" text-anchor="end">dhaar, own ceiling</text>
+      <text x="198" y="120" text-anchor="end">dhaar, one peer</text>
       <text x="198" y="158" text-anchor="end">dhaar, live swarm</text>
       <text x="198" y="196" text-anchor="end">One HTTP stream</text>
     </g>
@@ -55,7 +55,7 @@
     <!-- caveats, said on the chart rather than only in prose -->
     <g font-size="10.5" fill="#7d8590" opacity="0.8">
       <text x="210" y="256">Link measured with 8 parallel streams to one mirror — a floor on capacity, not a ceiling.</text>
-      <text x="210" y="272">Own ceiling is two instances over loopback: no network, warm cache. Live swarm varies ±20%.</text>
+      <text x="210" y="272">One peer is two instances over loopback: no network, warm cache — not a ceiling. Live swarm varies ±20%.</text>
     </g>
 
   </g>

@@ -49,7 +49,7 @@ proof that an accepted connection carried it.
 cargo bench                      # divan; add a filter, e.g. cargo bench -- write_
 ```
 
-<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, the client's own no-network ceiling is 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
+<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
 
 The number that matters is how much of the link we actually use, so that is what
 the client is measured against.
@@ -57,7 +57,7 @@ the client is measured against.
 | | rate | how it was measured |
 | --- | ---: | --- |
 | What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
-| dhaar, own ceiling | 4.3 MB/s | seeder and leecher on one machine over loopback, 64 MiB |
+| dhaar, one peer | 4.3 MB/s | seeder and leecher on one machine over loopback, 64 MiB |
 | dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, varies ±20% between runs |
 | One HTTP stream | 0.5 MB/s | single request to the same mirror |
 
@@ -65,18 +65,51 @@ the client is measured against.
 stream 5x is BitTorrent working as intended — many peers outrunning one server —
 but 2.5 against 9.9 is four times the throughput sitting unclaimed.
 
-The loopback row is what rules out the network as the culprit. Two instances on
-one machine, no latency, warm page cache, and it still stops at 4.3 MB/s. That
-is the client's own ceiling, and it is *below* what the link offers, so the
-bottleneck is our own bookkeeping rather than anything outside the process. It
-works out to roughly 3.8 ms per 16 KiB block, spent on four actor round-trips
-that all funnel through the single-task piece manager.
+The loopback row is one peer, and one peer's limit is not the client's. Two
+instances on one machine, no latency, warm page cache, and a single connection
+still stops at about 4 MB/s — roughly 3.8 ms per 16 KiB block, spent on four
+actor round-trips that all funnel through the piece manager.
 
-Two design decisions account for it. A peer may hold only one piece at a time,
+One design decision sets that number. A peer may hold only one piece at a time,
 which caps its outstanding requests at one piece's worth of blocks — sixteen
-here — so per-peer throughput is `piece_length / RTT` no matter how many peers
-connect. And every block costs those four round-trips through one task, which is
-the same saturation that makes the piece-event broadcast overflow under load.
+here — so per-peer throughput is `piece_length / RTT` however many peers
+connect. Loopback RTT is microseconds and a real peer's is tens of
+milliseconds, which is why the live swarm sits so far below the loopback row.
+Against that cap, adding peers is the only lever the client has.
+
+#### Scaling with peers
+
+`scripts/bench-seeders.sh` pulls that lever directly: N seeders on loopback,
+each resuming an already-complete store, and a leecher timed from launch to
+finished payload. Release build, 128 MiB, median of three runs, store in tmpfs.
+
+| seeders | rate | vs 1 peer | per peer |
+| ---: | ---: | ---: | ---: |
+| 1 | 5.9 MB/s | 1.0x | 5.9 MB/s |
+| 2 | 12.7 MB/s | 2.1x | 6.3 MB/s |
+| 4 | 27.9 MB/s | 4.7x | 7.0 MB/s |
+| 8 | 40.1 MB/s | 6.8x | 5.0 MB/s |
+| 16 | 70.1 MB/s | 11.8x | 4.4 MB/s |
+| 32 | 97.0 MB/s | 16.4x | 3.0 MB/s |
+
+**Nothing plateaus.** Throughput is still climbing at 32 peers, sixteen times
+what one peer manages. Per-peer rate holding flat through four peers is the
+`piece_length / RTT` cap behaving as advertised; the decay after that is the
+single-task piece manager starting to charge for itself. It is a toll rather
+than a wall — each new connection is worth less than the last, and none of them
+is worth nothing.
+
+The store lives in tmpfs there because that is the only way to see the client's
+own shape. On a real filesystem the disk arrives first:
+
+| seeders | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ext4, same arms | 4.6 | 9.1 | 14.6 | 19.5 | 20.5 | 20.5 MB/s |
+
+Flat from eight peers on, at the write rate of the disk underneath — the client
+is not in that measurement at all past that point. So the peer table describes
+the client, and this one describes the hardware, and on this machine a real
+download stops caring about peer count at around eight.
 
 #### Component costs
 
@@ -103,6 +136,11 @@ got faster is a separate question with a separate answer — the disk path here
 once got 2.8x faster while download speed did not move at all. Benchmark
 figures also shift about 2x with background load, so re-run on a quiet machine
 before reading anything into a difference.
+
+Where the store lives moves them as much as any code change: the same peer
+arms top out at 20 MB/s on ext4 and 97 MB/s in tmpfs. And the wide arms run 33
+processes on 20 cores, with the seeders competing against the leecher they are
+feeding, so the bottom of that table is a floor rather than a measurement.
 
 ### Architecture
 
