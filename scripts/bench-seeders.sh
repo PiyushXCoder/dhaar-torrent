@@ -208,6 +208,8 @@ PYEOF
 # --- set up ------------------------------------------------------------------
 # Release build: a debug build measures rustc's bounds checks, not the client.
 
+echo "workdir: $WORK"
+
 echo "building (release)"
 cargo build --release --quiet --manifest-path "$REPO/Cargo.toml"
 
