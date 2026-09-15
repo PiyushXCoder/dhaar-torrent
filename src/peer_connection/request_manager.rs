@@ -24,6 +24,19 @@ use tracing::{debug, trace, warn};
 /// measurement can be switched on without the rest of the debug output:
 /// `RUST_LOG=dhaar_torrent=info,request_window=trace`.
 const WINDOW_TARGET: &str = "request_window";
+/// Target for the serving side, separate from `WINDOW_TARGET` so a seeding run
+/// and a leeching run can be measured without either burying the other.
+const SERVE_TARGET: &str = "serve_latency";
+
+/// A block this connection has asked for and not yet been given.
+///
+/// The timestamp is the whole reason this is not a bare `u32`: the round trip
+/// from asking to being answered is what the request window has to be sized
+/// against, and it is the one quantity nothing else in the client records.
+struct ActiveBlock {
+    index: u32,
+    requested_at: time::Instant,
+}
 
 /// Any traffic at all resets this. Purely a liveness check.
 ///
@@ -138,7 +151,7 @@ pub struct RequestManager {
     pub peer_bitfield: Bitfield,
     active_piece: Option<PieceHold>,
     pub active_piece_length: u64,
-    pub active_blocks: Vec<u32>,
+    active_blocks: Vec<ActiveBlock>,
     pub piece_manager_channel_sender: PieceManagerChannelSender,
     pub incoming_channel_receiver: IncomingChannelReceiver,
     pub outgoing_channel_sender: OutgoingChannelSender,
@@ -382,7 +395,7 @@ impl RequestManager {
                 let Some(position) = self
                     .active_blocks
                     .iter()
-                    .position(|active| *active == block_index)
+                    .position(|active| active.index == block_index)
                 else {
                     return Ok(());
                 };
@@ -534,7 +547,10 @@ impl RequestManager {
                 length,
             })
             .await?;
-            self.active_blocks.push(block_index);
+            self.active_blocks.push(ActiveBlock {
+                index: block_index,
+                requested_at: time::Instant::now(),
+            });
         }
         if !claim.blocks.is_empty() {
             debug!(
@@ -543,6 +559,17 @@ impl RequestManager {
                 claim.blocks.len(),
                 claim.piece_index,
                 self.active_blocks.len()
+            );
+            // The increment half of the window series. The prose above stays
+            // for anyone reading the log; this is the same fact in the same
+            // shape as the decrement, so reconstructing the depth over time
+            // needs one parser rather than two.
+            trace!(
+                target: WINDOW_TARGET,
+                peer = %peer_addr(&self.peer),
+                depth = self.active_blocks.len(),
+                piece = claim.piece_index,
+                granted = claim.blocks.len(),
             );
         }
         Ok(())
@@ -607,7 +634,7 @@ impl RequestManager {
         let Some(position) = self
             .active_blocks
             .iter()
-            .position(|active| *active == block_index)
+            .position(|active| active.index == block_index)
         else {
             debug!(
                 "{}: block {} of piece {} was not requested",
@@ -623,20 +650,29 @@ impl RequestManager {
             self.stats.add_wasted(block.len() as u64);
             return Ok(());
         };
-        self.active_blocks.swap_remove(position);
-        // The only decrement of the request window, and so the half of its
-        // series that the refill log at `fill_pipeline` cannot show. Emitted
-        // as a bare sample rather than folded into a running average: what to
-        // do with the numbers -- mean depth over time, how fast a piece
-        // drains, how long the gap to the next refill is -- is a question for
-        // whatever reads the log, and answering it there costs nothing here
-        // and can be changed without another run.
+        let active = self.active_blocks.swap_remove(position);
+        // The decrement half of the window series, and the only place the
+        // round trip can be closed. Emitted as bare samples rather than folded
+        // into running averages: what to do with the numbers -- mean depth
+        // over time, how fast a piece drains, the latency distribution -- is a
+        // question for whatever reads the log, and answering it there costs
+        // nothing here and can be changed without another run.
+        //
+        // `mailbox` is how many messages are already queued for the piece
+        // manager. It is one task serving every connection, and it writes to
+        // disk and hashes inline, so when it falls behind every peer stalls at
+        // once and each one looks individually slow. Sampling it here, on the
+        // hot path, is what separates "waiting on the peer" from "waiting on
+        // ourselves".
         trace!(
             target: WINDOW_TARGET,
             peer = %peer_addr(&self.peer),
             depth = self.active_blocks.len(),
             piece = piece_index,
             block = block_index,
+            latency_us = active.requested_at.elapsed().as_micros() as u64,
+            mailbox = self.piece_manager_channel_sender.max_capacity()
+                - self.piece_manager_channel_sender.capacity(),
         );
         self.stats.add_downloaded(block.len() as u64);
 
@@ -691,6 +727,12 @@ impl RequestManager {
             return Ok(());
         }
         let block_index = (begin as u64 / BLOCK_SIZE) as u32;
+        // Covers the queue behind the piece manager as well as the read
+        // itself, which is the point: from here the two are one wait. Reads
+        // hit the page cache on a small torrent and the device on a large one,
+        // and the gap between those is three orders of magnitude, so the
+        // distribution matters far more than any average of it.
+        let read_started = time::Instant::now();
         let mut block = self
             .ask(|response_sender| PieceManagerMessage::ReadBlock {
                 piece_index: index,
@@ -698,6 +740,14 @@ impl RequestManager {
                 response_sender,
             })
             .await?;
+        trace!(
+            target: SERVE_TARGET,
+            peer = %peer_addr(&self.peer),
+            piece = index,
+            block = block_index,
+            read_us = read_started.elapsed().as_micros() as u64,
+            empty = block.is_empty(),
+        );
         if block.is_empty() {
             debug!(
                 "{}: storage returned nothing for piece {} block {}",
