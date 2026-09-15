@@ -132,7 +132,7 @@ where
     ) {
         let bitfield = self
             .piece_writer
-            .initialize(self.bitfield().0.len() as u32)
+            .initialize(self.pieces.iter().map(|p| p.hash).collect())
             .await
             .unwrap();
         if let Some(bitfield) = bitfield {
@@ -505,7 +505,7 @@ where
         };
         let offset = block_index as u64 * block_length;
         self.piece_writer
-            .write(piece_index, offset, self.piece_length, block_data)
+            .write(piece_index, offset, block_data)
             .await
             .unwrap(); // TODO: handle errors
         if let Some(blocks) = piece.blocks.as_mut()
@@ -532,7 +532,7 @@ where
             }
             let data = self
                 .piece_writer
-                .read(piece_index, 0, self.piece_length, piece_length)
+                .read(piece_index, 0, piece_length)
                 .await
                 .unwrap();
             let hash: [u8; 20] = sha1::Sha1::digest(&data).into();
@@ -566,11 +566,7 @@ where
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
         let piece_size = self.piece_size(piece_index);
-        let Ok(data) = self
-            .piece_writer
-            .read(piece_index, 0, self.piece_length, piece_size)
-            .await
-        else {
+        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -652,7 +648,7 @@ mod tests {
 
         async fn initialize(
             &mut self,
-            _bitfield_length: u32,
+            _piece_hashes: Vec<[u8; 20]>,
         ) -> Result<Option<Bitfield>, Self::Error> {
             Ok(None)
         }
@@ -661,7 +657,6 @@ mod tests {
             &self,
             piece_index: u32,
             piece_offset: u64,
-            _piece_length: u64,
             length: u64,
         ) -> Result<Vec<u8>, Self::Error> {
             let mut out = self
@@ -677,7 +672,6 @@ mod tests {
             &mut self,
             piece_index: u32,
             piece_offset: u64,
-            _piece_length: u64,
             data: Vec<u8>,
         ) -> Result<(), Self::Error> {
             self.writes += 1;

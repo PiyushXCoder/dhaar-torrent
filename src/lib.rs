@@ -96,6 +96,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
         );
         let piece_writer = DiskPieceWriter::new(
             torrent.info.total_length(),
+            torrent.info.piece_length,
             &torrent.info.name,
             &torrent.info.md5sum,
             &torrent.info.files,

@@ -160,7 +160,7 @@ HTTPServer(('127.0.0.1', int(sys.argv[1])), Tracker).serve_forever()
 PYEOF
 
 # --- a torrent, and one complete store to clone the seeders from -------------
-# A .dhaar store is [payload][bitfield][info_hash]; a complete one makes a
+# A .dhaar store is [payload][bitfield][info_hash][flags]; a complete one makes a
 # seeder resume at 100% without ever needing a peer. `finalize` copies out of
 # that store rather than consuming it, so the same directory can be reused for
 # every run of every arm.
@@ -201,6 +201,10 @@ with open(os.path.join(work, 'template', 'payload.bin.dhaar'), 'wb') as f:
     f.write(payload)
     f.write(bitfield)
     f.write(hashlib.sha1(benc(info)).digest())
+    # The flag byte. Bit 0 is the clean bit, set here because this store is
+    # being handed over as a tidy exit -- the client then trusts the bitfield
+    # above instead of re-hashing every piece behind it.
+    f.write(b'\x01')
 
 print(len(pieces))
 PYEOF

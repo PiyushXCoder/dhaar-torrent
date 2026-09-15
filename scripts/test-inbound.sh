@@ -116,7 +116,7 @@ PYEOF
 # `pnpx create-torrent` ignores its own -a and -l flags here and writes a UDP
 # announce, which this client does not speak, so the file is built directly.
 #
-# A .dhaar store is [payload][bitfield][info_hash]. Handing the seeder a
+# A .dhaar store is [payload][bitfield][info_hash][flags]. Handing the seeder a
 # complete one makes it resume at 100% without ever needing a peer.
 
 cat > "$WORK/mkfixture.py" <<'PYEOF'
@@ -155,6 +155,10 @@ with open(os.path.join(work, 'seeder', 'payload.bin.dhaar'), 'wb') as f:
     f.write(payload)
     f.write(bitfield)
     f.write(hashlib.sha1(benc(info)).digest())
+    # The flag byte. Bit 0 is the clean bit, set here because this store is
+    # being handed over as a tidy exit -- the client then trusts the bitfield
+    # above instead of re-hashing every piece behind it.
+    f.write(b'\x01')
 
 print(len(pieces))
 PYEOF
