@@ -34,7 +34,7 @@ const REQUEST_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 /// Pieces we failed to lock can be freed by other peers at any time and no
 /// event tells us about it, so we re-check on our own.
 const AVAILABILITY_TICK: time::Duration = time::Duration::from_secs(5);
-const MAX_REQUESTS: u32 = 8;
+const MAX_REQUESTS: u32 = 50;
 
 /// A claimed piece, held for as long as this connection is working it.
 ///
