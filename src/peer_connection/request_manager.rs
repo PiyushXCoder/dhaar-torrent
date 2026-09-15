@@ -18,7 +18,12 @@ use tokio::{
     sync::{broadcast, oneshot},
     time,
 };
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
+
+/// Target for the request-window series, kept off the module path so one
+/// measurement can be switched on without the rest of the debug output:
+/// `RUST_LOG=dhaar_torrent=info,request_window=trace`.
+const WINDOW_TARGET: &str = "request_window";
 
 /// Any traffic at all resets this. Purely a liveness check.
 ///
@@ -611,6 +616,20 @@ impl RequestManager {
             return Ok(());
         };
         self.active_blocks.swap_remove(position);
+        // The only decrement of the request window, and so the half of its
+        // series that the refill log at `fill_pipeline` cannot show. Emitted
+        // as a bare sample rather than folded into a running average: what to
+        // do with the numbers -- mean depth over time, how fast a piece
+        // drains, how long the gap to the next refill is -- is a question for
+        // whatever reads the log, and answering it there costs nothing here
+        // and can be changed without another run.
+        trace!(
+            target: WINDOW_TARGET,
+            peer = %peer_addr(&self.peer),
+            depth = self.active_blocks.len(),
+            piece = piece_index,
+            block = block_index,
+        );
         self.stats.add_downloaded(block.len() as u64);
 
         let peer = self.peer.unwrap();
