@@ -36,6 +36,9 @@ where
     /// Republished whenever a piece verifies. Only this loop writes it, so
     /// every value it carries is of one instant.
     progress: watch::Sender<PieceProgress>,
+    /// Set once `finalize` has written the payload out. Only this loop reads
+    /// or writes it, so it needs no synchronisation of its own.
+    extracted: bool,
     _info_hash: [u8; 20],
 }
 
@@ -122,6 +125,7 @@ where
             piece_events: channel::new_piece_event_channel(),
             stats,
             progress,
+            extracted: false,
             _info_hash: info_hash,
         }
     }
@@ -559,7 +563,13 @@ where
                 .send(channel::PieceEvent::PieceComplete { piece_index });
 
             if self.is_completed() {
+                // The publish above said every piece was verified, which is
+                // where `Finalizing` begins. Extraction copies the whole
+                // store, so subscribers sit in that state for as long as it
+                // takes; the republish below is what ends it.
                 self.piece_writer.finalize().await.unwrap();
+                self.extracted = true;
+                self.publish_progress();
             }
         }
     }
@@ -593,6 +603,7 @@ where
                 .sum(),
             total_bytes: self.total_length,
             bitfield: self.bitfield(),
+            extracted: self.extracted,
         });
     }
 
