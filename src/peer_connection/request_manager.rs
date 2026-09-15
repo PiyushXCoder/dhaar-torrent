@@ -589,6 +589,7 @@ impl RequestManager {
                 peer_addr(&self.peer),
                 index
             );
+            self.stats.add_wasted(block.len() as u64);
             return Ok(());
         };
         if index != piece_index || !(begin as u64).is_multiple_of(BLOCK_SIZE) {
@@ -599,6 +600,7 @@ impl RequestManager {
                 begin,
                 piece_index
             );
+            self.stats.add_wasted(block.len() as u64);
             return Ok(());
         }
         let block_index = (begin as u64 / BLOCK_SIZE) as u32;
@@ -613,6 +615,12 @@ impl RequestManager {
                 block_index,
                 piece_index
             );
+            // Bytes that crossed the network and cannot be used -- most often
+            // an endgame copy still in flight when the cancel was sent. The
+            // wasted figure is how the endgame threshold would be tuned, so
+            // dropping these silently understates exactly the thing it exists
+            // to measure.
+            self.stats.add_wasted(block.len() as u64);
             return Ok(());
         };
         self.active_blocks.swap_remove(position);
