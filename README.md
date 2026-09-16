@@ -8,179 +8,230 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-~60% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to one piece's worth of outstanding requests per peer — sixteen at a 256 KiB piece length), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout. The last piece of a torrent is short, and its block count, request lengths, hash check and disk reads are all sized to it rather than to the full piece length.
+~60% complete, and a working download end to end. Peers are discovered over HTTP
+trackers, connections are handshaked and framed with a `tokio-util` codec, blocks
+are requested with pipelining, completed pieces are SHA-1 verified and written to
+disk, and the finished download is split into the torrent's real file layout. The
+last piece is short, and its block count, request lengths, hash check and disk
+reads are all sized to it rather than to the full piece length.
 
-The tail of a download no longer stalls behind one slow peer: once every remaining piece is spoken for, the same blocks are requested from several peers at once and the losers are cancelled as soon as somebody else delivers. Finished pieces are announced to every connected peer with `Have`, and the tracker is told the real `uploaded`/`downloaded`/`left` figures along with `started` and `completed` events.
+The tail of a download does not stall behind one slow peer: once every remaining
+piece is spoken for, the same blocks are requested from several peers at once and
+the losers are cancelled as soon as somebody else delivers.
 
-The whole thing is a library. `Download` owns the wiring, hands back a handle, and reports live status — bytes, rates, peers, pieces in flight, wasted bytes, hash failures — which is what the GUI above is rendering.
+Peers can reach us, not just the other way round — the peer manager binds a TCP
+listener and supervises accepted connections alongside dialled ones. A download
+survives a restart: the partial `.dhaar` store is read back on start and its
+verified pieces kept, which is what lets an instance come up already seeding.
 
-Connections keep themselves alive: a keep-alive goes out after 100s of silence, and one arriving resets the idle timer, which is why that timer is 150s — longer than the two minutes peers conventionally leave between keep-alives, so a peer with nothing to say is no longer dropped for saying nothing.
-
-Peers can reach us now, not just the other way round. The peer manager binds a TCP listener on a port you pick (`--listening-port`, default 6881) and supervises accepted connections alongside dialled ones; that same port is what gets announced to the tracker. A download also survives a restart: the partial `.dhaar` store is read back on start and its verified pieces are kept, which is what lets an instance come up already seeding.
+The whole thing is a library. `Download` owns the wiring, hands back a handle,
+and reports live status — bytes, rates, peers, pieces in flight, wasted bytes,
+hash failures — which is what the GUI above is rendering.
 
 Still missing: web seeds, DHT, UDP trackers, and magnet links.
 
 ### Known rough edges
 
-- **Trackers are the only peer source.** `announce` is optional and `announce-list` alone is enough, but a torrent that ships neither — Arch Linux's ISO torrent, for example, which carries only a BEP 19 `url-list` of web seeds — parses fine and then finds no peers at all. It logs a warning and sits idle.
-- **A resumed store is invisible to the tracker.** Pieces recovered from disk set the progress counters but never pass through `piece_verified`, which is what `verified_bytes` counts. An instance that comes up complete therefore announces `left` as the full torrent length and never leaves the `Downloading` state, so trackers and peers read it as having nothing.
-- **Inbound connections are uncapped.** The 50-connection limit is checked before dialling out, but nothing bounds how many connections we accept, and accepted peers now draw on the same budget — enough incoming can crowd out dialling entirely.
-- **An inbound peer cannot be reconnected to.** A peer that dials us is known only by the ephemeral source port it called from, which nothing listens on. That address is deliberately not queued for retry, and the base protocol carries no way to learn the real one — that needs the BEP 10 extended handshake.
-- **Torrents without a `creation date` are rejected.** The field is `Option`, but pairing `Option` with a `deserialize_with` and no `#[serde(default)]` makes serde require it anyway, so a perfectly valid file fails to parse.
-- **A failed `accept()` spins.** The listener arm matches on `Ok(..)`, so an error falls through the pattern and the branch re-arms immediately; a persistent failure like running out of file descriptors becomes a busy loop.
+- **Trackers are the only peer source.** `announce` is optional and
+  `announce-list` alone is enough, but a torrent that ships neither — Arch
+  Linux's ISO torrent, which carries only a BEP 19 `url-list` of web seeds —
+  parses fine and then finds no peers at all. It logs a warning and sits idle.
+- **A resumed store is invisible to the tracker.** Pieces recovered from disk
+  set the progress counters but never pass through `piece_verified`, which is
+  what `verified_bytes` counts. An instance that comes up complete announces
+  `left` as the full torrent length and never leaves `Downloading`, so trackers
+  and peers read it as having nothing.
+- **A store belonging to another torrent is never reclaimed.** If the info hash
+  on disk does not match, `initialize` returns no bitfield but leaves the old
+  identity in place, so the same mismatch happens on the next start. That store
+  rediscards its progress every time, silently and permanently.
+- **The store format has no version.** The trailer has grown once already, and a
+  store written by an older build fails the size check and is laid out fresh —
+  the payload survives but the bitfield is zeroed. There is no way to tell "old
+  format" from "corrupt", which are opposite situations.
+- **Completion can go unreported.** The status feed is sampled once a second, so
+  a download that finishes and exits inside one interval never publishes its
+  final state. The data is correct on disk; only the report is missing.
+- **Inbound connections are uncapped.** The 50-connection limit is checked
+  before dialling out, but nothing bounds how many we accept, and accepted peers
+  draw on the same budget — enough incoming can crowd out dialling entirely.
+- **An inbound peer cannot be reconnected to.** A peer that dials us is known
+  only by the ephemeral source port it called from, which nothing listens on.
+  The base protocol carries no way to learn the real one; that needs the BEP 10
+  extended handshake.
+- **Torrents without a `creation date` are rejected.** The field is `Option`,
+  but pairing `Option` with a `deserialize_with` and no `#[serde(default)]`
+  makes serde require it anyway, so a valid file fails to parse.
+- **A failed `accept()` spins.** The listener arm matches on `Ok(..)`, so an
+  error falls through the pattern and the branch re-arms immediately; a
+  persistent failure like running out of file descriptors becomes a busy loop.
 
-### Testing
+## Usage
 
-`cargo test` covers the codec and parsing. Behaviour that only shows up between
-two processes has its own script:
+### GUI
 
 ```sh
-scripts/test-inbound.sh          # --keep to retain the logs
+cargo run -p dhaar-gui
 ```
 
-It stands up a private tracker, builds a torrent and a pre-completed store, and
-runs a seeder and a leecher against each other. The seeder announces into an
-empty swarm so it has nobody to dial, which is what makes every byte that moves
-proof that an accepted connection carried it.
+Press **Add torrent** to choose a `.torrent` file, and add as many as you like.
+Paths given on the command line start immediately. See
+[`crates/dhaar-gui`](crates/dhaar-gui) for what it does and does not do.
 
-### Benchmarks
+### CLI
 
 ```sh
-cargo bench                      # divan; add a filter, e.g. cargo bench -- write_
+dhaar-torrent <torrent_file> [OPTIONS]
 ```
 
-<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 6.1 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
+| Flag | Description |
+| --- | --- |
+| `-c, --config-file <PATH>` | Config file (default: `~/.config/dhaar-torrent/config.toml`) |
+| `-l, --listening-port <PORT>` | Port to accept incoming peers on, and the one announced to the tracker (default: 6881) |
 
-The number that matters is how much of the link we actually use, so that is what
-the client is measured against.
+```sh
+dhaar-torrent ubuntu.torrent
+dhaar-torrent ubuntu.torrent --listening-port 51413
+```
+
+Progress is logged once a second. `RUST_LOG` controls the detail:
+
+```sh
+RUST_LOG=dhaar_torrent=debug dhaar-torrent ubuntu.torrent
+```
+
+### Library
+
+```rust
+use dhaar_torrent::Download;
+use std::path::Path;
+
+let download = Download::from_torrent_file(Path::new("ubuntu.torrent"), 6881)?;
+let mut updates = download.subscribe();  // taken before starting, so nothing is missed
+
+// Held for as long as the download should live: dropping it stops the download.
+let _handle = download.spawn();          // returns immediately
+
+while updates.changed().await.is_ok() {
+    println!("{:.1}%", updates.borrow().progress() * 100.0);
+}
+```
+
+Downloads land in the current working directory. While in flight the data lives
+in a single `<name>.dhaar` file; once every piece verifies it is split into the
+torrent's real file layout.
+
+## Testing
+
+`cargo test --workspace` covers the codec and parsing. Behaviour that only shows
+up between two processes has its own scripts, each of which stands up a private
+tracker and real client processes:
+
+```sh
+scripts/test-inbound.sh          # --keep on any of these retains the logs
+scripts/test-repair.sh
+```
+
+`test-inbound.sh` runs a seeder and a leecher against each other, with the seeder
+announcing into an empty swarm so it has nobody to dial — which is what makes
+every byte that moves proof that an *accepted* connection carried it.
+
+`test-repair.sh` hands two clients the same deliberately damaged store — a
+complete bitfield, one piece whose bytes do not match its hash — differing only
+in the flag byte. With the clean bit clear the client must re-hash and disown the
+bad piece; with it set the client must take the bitfield at its word. The second
+arm is what proves the flag gates the work rather than repair running
+unconditionally.
+
+## Benchmarks
+
+```sh
+scripts/bench-seeders.sh         # end to end: N seeders, one leecher, timed
+cargo bench                      # divan; component costs of the disk path
+```
+
+One peer's throughput is capped by one design decision: a peer may hold only one
+piece at a time, so its outstanding requests can never exceed a piece's worth of
+blocks — sixteen at a 256 KiB piece length. Per-peer throughput is therefore
+`piece_length / RTT` however many peers connect, and adding peers is the only
+lever the client has. `bench-seeders.sh` pulls it directly.
+
+Release build, store on ext4, 128 MiB, median of three runs — and then the whole
+sweep run twice, because a single sweep turns out not to be worth much:
+
+| seeders | rate | vs 1 peer |
+| ---: | ---: | ---: |
+| 1 | ~6 MB/s | 1.0x |
+| 2 | ~16 MB/s | 2.6x |
+| 4 | ~34 MB/s | 5.7x |
+| 8 | ~43 MB/s | 7.2x |
+| 16 | 144–177 MB/s | ~25x |
+| 32 | 152–201 MB/s | ~30x |
+
+**Nothing plateaus.** Two sweeps agree within about 5% up to eight peers, which
+is why those rows are quoted to two figures and no more. Past that they do not
+agree at all: the sixteen- and thirty-two-peer arms vary by 9–22% between
+identical runs, so they are given as ranges.
+
+Two reasons, and both are about the harness rather than the client. At 128 MiB
+those arms finish in under a second while the timer starts at process launch, so
+a fixed startup cost is being divided into a shrinking transfer — at 512 MiB the
+same arms report 155–177 and 184–201. And the wide arms run 33 processes on 20
+cores, with the seeders competing against the leecher they are feeding. The
+eight-peer arm is the last one that means what it says.
+
+The disk is not the limit. `write_whole_piece` — sixteen blocks plus the bitfield
+update, the real cost of a completed piece — runs at 235–268 µs on ext4, around
+1 GB/s, which is two orders of magnitude faster than the client can fill it. What
+matters there is the spread rather than the median: `read_block` is 12–18 µs
+typically and 9–10 ms at its worst, because most reads are served from the page
+cache and the occasional one is a real seek. That is why the read path stays on a
+blocking thread pool, and it is the figure that counts when seeding something too
+large to cache.
+
+### Reading these honestly
+
+- **Name the filesystem.** `cargo bench` follows `TMPDIR`, which on most machines
+  is tmpfs — where `fsync` has no device to reach and the disk path stops being a
+  disk path. The store used to need a RAM disk for the client's own shape to be
+  visible at all; since the per-piece flush was removed, tmpfs and ext4 agree
+  within a few percent, but that was a 5x difference until recently and nothing
+  guarantees it stays closed.
+- **Know which numbers reproduce.** Run the same bench twice on the same quiet
+  machine and `hash_piece` lands within 1%, because it is pure CPU. Everything
+  that touches the disk moves by 12–55% — `read_block` was 11.8 µs one run and
+  18.3 µs the next. Quote a disk figure to more than two significant figures and
+  you are reporting the page cache's mood.
+- **A microbenchmark only says a *function* got faster.** Whether a *download*
+  got faster is a separate question with a separate answer. Removing the
+  per-piece flush is big enough to clear the noise by a wide margin — a 2.8 ms
+  `set_bitfield` became roughly 10 µs, and the eight-peer arm went from 19.5 to
+  ~43 MB/s — but an earlier disk change was worth 2.8x on the bench and nothing
+  at all end to end.
+- **Only trust a difference bigger than the spread.** Two identical sweeps
+  disagree by 5% up to eight peers and by up to 22% above it, so anything under
+  about a third is not a result yet.
+- **The chart below is a dated snapshot**, kept because it records a real
+  measurement rather than because it is current. All four of its bars come from
+  one session on a real network, before the durability change; the loopback bar
+  in particular is now closer to 6 MB/s. Re-running it means re-running all four
+  together — splicing one fresh bar into it would break the only thing that
+  makes the comparison meaningful.
+
+<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
 
 | | rate | how it was measured |
 | --- | ---: | --- |
 | What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
-| dhaar, one peer | 6.1 MB/s | seeder and leecher on one machine over loopback, 128 MiB |
-| dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, varies ±20% between runs |
+| dhaar, one peer | 4.3 MB/s | two instances over loopback — ~6 MB/s today |
+| dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, ±20% between runs |
 | One HTTP stream | 0.5 MB/s | single request to the same mirror |
 
-**We use about a quarter of the bandwidth available.** Beating a single HTTP
-stream 5x is BitTorrent working as intended — many peers outrunning one server —
-but 2.5 against 9.9 is four times the throughput sitting unclaimed.
+Beating a single HTTP stream 5x is BitTorrent working as intended — many peers
+outrunning one server. Against the link as a whole there was four times the
+throughput sitting unclaimed when this was last measured.
 
-The loopback row is one peer, and one peer's limit is not the client's. Two
-instances on one machine, no latency, warm page cache, and a single connection
-still stops at about 6 MB/s — roughly 2.7 ms per 16 KiB block, spent on four
-actor round-trips that all funnel through the piece manager.
-
-One design decision sets that number. A peer may hold only one piece at a time,
-which caps its outstanding requests at one piece's worth of blocks — sixteen
-here — so per-peer throughput is `piece_length / RTT` however many peers
-connect. Loopback RTT is microseconds and a real peer's is tens of
-milliseconds, which is why the live swarm sits so far below the loopback row.
-Against that cap, adding peers is the only lever the client has.
-
-#### Scaling with peers
-
-`scripts/bench-seeders.sh` pulls that lever directly: N seeders on loopback,
-each resuming an already-complete store, and a leecher timed from launch to
-finished payload. Release build, 128 MiB, median of three runs, store on ext4.
-
-| seeders | rate | vs 1 peer | per peer |
-| ---: | ---: | ---: | ---: |
-| 1 | 6.1 MB/s | 1.0x | 6.1 MB/s |
-| 2 | 16.3 MB/s | 2.7x | 8.2 MB/s |
-| 4 | 33.2 MB/s | 5.4x | 8.3 MB/s |
-| 8 | 44.5 MB/s | 7.3x | 5.6 MB/s |
-| 16 | 143.6 MB/s | 23.4x | 9.0 MB/s |
-| 32 | 152.0 MB/s | 24.8x | 4.8 MB/s |
-
-**Nothing plateaus.** Throughput is still climbing at 32 peers, twenty-five
-times what one peer manages. Per-peer rate holding through four peers is the
-`piece_length / RTT` cap behaving as advertised; past that each new connection
-is worth less than the last, and none of them is worth nothing.
-
-The last two rows are floors, not measurements. At 128 MiB those arms finish in
-under a second, and the timer starts at process launch — so a fixed cost of
-startup, announce and handshakes is being divided into a shrinking transfer. At
-512 MiB the same arms report 155 and 184 MB/s. The eight-peer arm measures the
-same either way (44.5 against 44.9), which is what says the shorter payload is
-sound everywhere above a second.
-
-The store used to live in tmpfs here, because the disk arrived first and
-drowned out the client. That is no longer true, and the reason is worth
-recording: the same arms on tmpfs now give 6.0, 16.4, 34.2 and 47.0 MB/s
-through eight peers — within a few percent of ext4 at every point. Real storage
-and a RAM disk are no longer distinguishable from inside this client, so there
-is one table where there used to be two.
-
-Two changes account for the distance from the previous figures, which topped out
-at 20.5 MB/s on ext4:
-
-- **removing the per-piece flush** (see below) lifted a ceiling that sat at
-  25 MB/s and looked exactly like a disk being slow
-- **widening the request window** from eight blocks to a piece's worth of
-  sixteen is worth about 12% at four peers on its own — 30.5 against 34.2 MB/s
-  measured with the constant put back
-
-The second is smaller than it looks like it should be, because the window can
-only ever reach the block count of one piece however high the constant goes.
-
-#### Component costs
-
-None of these are the limit, which is the useful thing to know about them. They
-are measured against the real `DiskPieceWriter` rather than a model of it, in a
-release build, medians over 100 samples, **store on ext4**. The benchmark
-follows `TMPDIR`, which on most machines points at tmpfs — where `fsync` has no
-device to reach and the disk path stops being a disk path at all. Run it with
-`TMPDIR` on real storage or the numbers describe memory.
-
-| what | median | throughput |
-| --- | ---: | ---: |
-| `set_bitfield` | 8.46 µs | — |
-| `read_block` | 11.76 µs | 1.39 GB/s |
-| `write_block` | 15.55 µs | 1.05 GB/s |
-| `hash_piece` | 214.7 µs | 1.22 GB/s |
-| `write_whole_piece` | 268.1 µs | 977 MB/s |
-
-Storage runs over two hundred times faster than the client can fill it, so
-tuning it further buys nothing. Distributions matter more than averages here:
-`read_block` has a median of 12 µs and a worst case of 10.3 ms — a spread of
-nearly a thousand to one, because most reads are served from the page cache and
-the occasional one is a real seek. That spread is why the read path stays on a
-blocking thread pool, and it is the figure that matters when seeding something
-too large to cache.
-
-`set_bitfield` is the one to watch, because it is the one that was expensive.
-It used to sync the payload, write the claim, then sync the claim again — one
-device flush per completed piece, which measured **2.82 ms** on ext4 and capped
-`write_whole_piece` at 25 MB/s. Moving that durability to a flag byte checked on
-resume, so a claim that outlived its data is corrected on the way back in rather
-than prevented on the way out, took the same piece from 10.3 ms to 268 µs:
-
-| | before | after |
-| --- | ---: | ---: |
-| `set_bitfield` | 2.82 ms | 8.46 µs |
-| `write_whole_piece` | 10.32 ms — 25 MB/s | 268 µs — 977 MB/s |
-
-That is the largest single change the disk path has seen, and it is invisible on
-tmpfs: the same comparison there reports 7.9 µs against 9.9 µs, because a flush
-to nowhere costs nothing. A benchmark that cannot see a 39x change is not a
-benchmark yet.
-
-A microbenchmark only ever says a *function* got faster. Whether a *download*
-got faster is a separate question with a separate answer — the disk path here
-once got 2.8x faster while download speed did not move at all. Benchmark
-figures also shift about 2x with background load, so re-run on a quiet machine
-before reading anything into a difference.
-
-Where the store lives used to move them as much as any code change — the peer
-arms once topped out at 20 MB/s on ext4 against 97 MB/s in tmpfs. Removing the
-per-piece flush closed that gap, and the two substrates now agree within a few
-percent, but the habit of naming the filesystem is worth keeping: it was a 5x
-difference until recently and nothing guarantees it stays closed. The wide arms
-also run 33 processes on 20 cores, with the seeders competing against the
-leecher they are feeding, so the bottom of that table is a floor rather than a
-measurement.
-
-### Architecture
+## Architecture
 
 Components are independent tokio tasks talking over mpsc channels:
 
@@ -192,9 +243,24 @@ Components are independent tokio tasks talking over mpsc channels:
 - **`piece_manager`** — the sole arbiter of who downloads what: it picks a peer's piece, registers its blocks and reports back in a single message, so two peers cannot claim the same work in the gap between asking and taking. Also SHA-1 verification and writes via a `PieceWriter` trait (`DiskPieceWriter` is the disk impl)
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
 
-Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/dhaar-gui`](crates/dhaar-gui) (the reference client).
+Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and
+[`crates/dhaar-gui`](crates/dhaar-gui) (the reference client).
 
-### TODO
+### The store
+
+A download in flight lives in one file, `<name>.dhaar`, laid out as
+`[payload][bitfield][info_hash][flags]` and split into the torrent's real shape
+only on completion. `flags` is a single byte whose clean bit is set only on a
+tidy exit, so a store found without it was left by a crash and every piece its
+bitfield claims is re-hashed before it is believed.
+
+That is a deliberate trade. Writing a piece used to sync the payload, write the
+claim, then sync the claim — one device flush per piece, correct by construction
+and expensive enough to cap the whole client at 25 MB/s. Correcting a bad claim
+on the way back in costs one re-verification after a crash and nothing at all the
+rest of the time.
+
+## TODO
 
 - [x] CLI args and config parsing (clap + TOML with merge)
 - [x] Bencode deserializer (serde-based: integers, strings, bytes, lists, dicts, `Raw<T>`)
@@ -208,93 +274,46 @@ Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/
 - [x] Peer wire protocol — TCP handshake, choke/unchoke, interested, have, bitfield, request/piece/cancel/port messages
 - [x] Piece manager — piece indices, bitfield tracking, atomic cross-peer piece and block claiming, SHA-1 verification
 - [x] Request manager — per-peer connection state machine, pulled out of `peer_connection`
-- [x] Connection timeouts — handshake/bitfield timeouts, 60s idle timeout, 30s outstanding-request timeout
+- [x] Connection timeouts — handshake/bitfield timeouts, 150s idle timeout, 30s outstanding-request timeout
 - [x] Request pipelining — outstanding block requests capped at one piece's worth per peer
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
-- [x] Endgame mode — once only a few blocks remain, request them from every peer at once and `Cancel` the losers, so one slow peer can no longer hold the tail for a full 30s request timeout
+- [x] Endgame mode — once only a few blocks remain, request them from every peer at once and `Cancel` the losers
 - [x] Completion state — stop dialing peers once every piece is verified
 - [x] Tracker reporting — real `uploaded`/`downloaded`/`left` and `started`/`completed` events
 - [x] `Download` wrapper struct — pull the wiring out of `main.rs`
-- [x] Status/progress — live counters and a sampled `DownloadStatus` feed, instead of the internals being silent
+- [x] Status/progress — live counters and a sampled `DownloadStatus` feed
 - [x] GUI client — iced, with a file picker and several downloads at once
 - [x] Periodic keep-alive messages — sent into silence only, and inbound ones no longer swallowed by the decoder
-- [x] Supervise connection tasks — the peer manager watches the tasks rather than waiting to be told, so a panic no longer leaks the slot
+- [x] Supervise connection tasks — the peer manager watches the tasks rather than waiting to be told
+- [x] Inbound connections — TCP listener on a configurable port, accepted connections supervised alongside dialled ones
+- [x] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
+- [x] Crash-safe resume — a flag byte marks an unclean exit and the bitfield is re-verified on the way back in, instead of a device flush per piece
+- [x] Seeding — `finalize` copies rather than moves, so the `.dhaar` store outlives completion and blocks can still be read out of it
+- [ ] A version in the store format, so an old store can be migrated rather than discarded
+- [ ] Publish completion as an event, not only as a once-a-second sample
+- [ ] Let the request window span pieces, so it refills instead of draining once per piece
 - [ ] `stopped` tracker event on shutdown
 - [ ] Count resumed pieces as verified, so `left` and the seeding state are right after a restart
 - [ ] Cap inbound connections, and reserve part of the budget so incoming cannot starve dialling
 - [ ] Identify peers by `peer_id` — mutual dials currently make two connections to one client
 - [ ] Handle `accept()` errors instead of letting the `select!` arm re-arm on failure
-- [x] Inbound connections — TCP listener on a configurable port, accepted connections supervised alongside dialled ones
 - [ ] Web seeds (BEP 19) — HTTP `url-list` sources for trackerless torrents
-- [x] Resume support — recover already-downloaded pieces from a partial `.dhaar` file on restart
 - [ ] Per-peer status — the library aggregates today and keeps no peer registry
 - [ ] Pause and resume a running download
-- [ ] Skip announce URLs we cannot speak — `udp://` and `wss://` go to the HTTP client and fail forever (144 warnings in 90s on a WebTorrent-made torrent)
+- [ ] Skip announce URLs we cannot speak — `udp://` and `wss://` go to the HTTP client and fail forever
 - [ ] Announce `completed` when the download finishes, rather than at the next scheduled announce
 - [ ] Tracker communication — UDP tracker (BEP 15)
 - [ ] DHT (BEP 5) — decentralized peer discovery
 - [ ] Magnet links (BEP 9/10) — metadata exchange
-- [x] Seeding — `finalize` copies rather than moves, so the `.dhaar` store outlives completion and blocks can still be read out of it
 - [ ] Message Stream Encryption (BEP 8) — WebTorrent opens encrypted handshakes by default, so its outgoing connections cannot talk to us at all
 - [ ] Rate limiting
 - [ ] `models/` module — shared domain types
 
-## Usage
-
-### GUI
-
-```sh
-cargo run -p dhaar-gui
-```
-
-Press **Add torrent** to choose a `.torrent` file, and add as many as you like. Paths given on the command line start immediately. See [`crates/dhaar-gui`](crates/dhaar-gui) for what it does and does not do.
-
-### CLI
-
-```sh
-dhaar-torrent <torrent_file> [OPTIONS]
-```
-
-| Flag                       | Description                                                          |
-| -------------------------- | -------------------------------------------------------------------- |
-| `-c, --config-file <PATH>` | Path to config file (default: `~/.config/dhaar-torrent/config.toml`) |
-
-```sh
-dhaar-torrent ubuntu.torrent
-dhaar-torrent ubuntu.torrent --config-file ./my-config.toml
-```
-
-Progress is logged once a second.
-
-### Library
-
-```rust
-use dhaar_torrent::Download;
-use std::path::Path;
-
-let download = Download::from_torrent_file(Path::new("ubuntu.torrent"))?;
-let mut updates = download.subscribe();  // taken before starting, so nothing is missed
-
-// Held for as long as the download should live: dropping it stops the download.
-let _handle = download.spawn();          // returns immediately
-
-while updates.changed().await.is_ok() {
-    println!("{:.1}%", updates.borrow().progress() * 100.0);
-}
-```
-
-Downloads land in the current working directory. While in flight the data lives in a single `<name>.dhaar` file; once every piece verifies, it is split into the torrent's real file layout.
-
-Set `RUST_LOG` to control log output:
-
-```sh
-RUST_LOG=dhaar_torrent=debug dhaar-torrent ubuntu.torrent
-```
-
 ## Config
 
-Config file lives at `~/.config/dhaar-torrent/config.toml` by default. TOML format. Nothing configurable there yet — every knob is still a CLI flag.
+Config file lives at `~/.config/dhaar-torrent/config.toml` by default. TOML
+format. Nothing configurable there yet — every knob is still a CLI flag.
 
 ## Build
 
