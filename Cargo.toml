@@ -40,7 +40,17 @@ tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
 toml = "1.1.2"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"] }
+# Optional: the tokio-console telemetry layer. Off by default because it
+# needs the whole crate built with `--cfg tokio_unstable`, which is not a
+# thing to impose on an ordinary build. See `scripts/console.sh`.
+console-subscriber = { version = "0.5.0", optional = true }
+
+[features]
+# Task-level telemetry for `tokio-console`. `tokio/tracing` is what makes the
+# runtime emit per-task spans; without it the console connects and shows
+# nothing.
+console = ["dep:console-subscriber", "tokio/tracing"]
 
 [dev-dependencies]
 divan = "0.1.21"
@@ -49,3 +59,15 @@ husky-rs = "0.3.3"
 [[bench]]
 name = "piece_writer"
 harness = false
+
+# Optimised like `release`, but keeps the symbols a profiler needs to name a
+# frame. Measuring a debug build answers a question nobody asked: it is the
+# same code with the optimiser switched off, and the shape of where the time
+# goes is not the same shape.
+#
+# A separate profile rather than `debug = true` on `release` so that
+# `target/release` stays exactly what `scripts/bench-seeders.sh` measures, and
+# so a profiling build and an ordinary one do not keep invalidating each other.
+[profile.profiling]
+inherits = "release"
+debug = true
