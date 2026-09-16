@@ -84,9 +84,15 @@ pub struct TrackerResponseRawPeer {
 impl TryFrom<TrackerResponseRawPeer> for TrackerResponse {
     type Error = Error;
     fn try_from(value: TrackerResponseRawPeer) -> Result<TrackerResponse> {
+        // Compact peers are six bytes each: four of address, two of port.
+        // `as_chunks` hands back the whole chunks and the short tail
+        // separately; `.0` is the former, and a tail that is not six bytes is
+        // not a peer.
         let peers: Vec<Peer> = value
             .peers
-            .chunks_exact(6)
+            .as_chunks::<6>()
+            .0
+            .iter()
             .map(|chunk| Peer {
                 peer_id: None,
                 ip: format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]),
