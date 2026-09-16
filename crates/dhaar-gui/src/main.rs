@@ -226,6 +226,7 @@ fn describe(status: &DownloadStatus) -> String {
     let state = match status.state {
         DownloadState::Starting => "starting",
         DownloadState::Downloading => "downloading",
+        DownloadState::Finalizing => "finalizing",
         DownloadState::Seeding => "seeding",
     };
     format!("{state} · {:.1}%", status.progress() * 100.0)
