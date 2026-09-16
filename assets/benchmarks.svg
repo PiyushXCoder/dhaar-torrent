@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 288" width="720" height="288" role="img" aria-label="Download rate compared with available link capacity: link allows 9.9 megabytes per second, one dhaar peer gets 4.3, a live swarm reaches 2.5, and a single HTTP stream gets 0.5">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 288" width="720" height="288" role="img" aria-label="Download rate compared with available link capacity: link allows 9.9 megabytes per second, one dhaar peer gets 6.1, a live swarm reaches 2.5, and a single HTTP stream gets 0.5">
   <title>What we get versus what the link allows</title>
-  <desc>Link capacity 9.9 MB/s measured with 8 parallel HTTP streams. dhaar reaches 2.5 MB/s on a live swarm, against 4.3 MB/s from a single peer over loopback. Peer count is the lever: 32 loopback peers reach 97 MB/s. A single HTTP stream from the same mirror gets 0.5 MB/s.</desc>
+  <desc>Link capacity 9.9 MB/s measured with 8 parallel HTTP streams. dhaar reaches 2.5 MB/s on a live swarm, against 6.1 MB/s from a single peer over loopback. Peer count is the lever: 32 loopback peers reach 184 MB/s. A single HTTP stream from the same mirror gets 0.5 MB/s.</desc>
 
   <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 
@@ -40,14 +40,14 @@
 
     <!-- bars -->
     <rect x="210" y="66" width="465.3" height="24" rx="3" fill="#58a6ff"/>
-    <rect x="210" y="104" width="202.1" height="24" rx="3" fill="#f0883e" fill-opacity="0.4"/>
+    <rect x="210" y="104" width="286.7" height="24" rx="3" fill="#f0883e" fill-opacity="0.4"/>
     <rect x="210" y="142" width="117.5" height="24" rx="3" fill="#f0883e"/>
     <rect x="210" y="180" width="23.5" height="24" rx="3" fill="#7d8590" fill-opacity="0.45"/>
 
     <!-- values -->
     <g font-size="11.5" font-weight="600" fill="#7d8590">
       <text x="685.3" y="82">9.9</text>
-      <text x="422.1" y="120">4.3</text>
+      <text x="506.7" y="120">6.1</text>
       <text x="337.5" y="158">2.5</text>
       <text x="243.5" y="196">0.5</text>
     </g>
