@@ -156,31 +156,38 @@ blocks — sixteen at a 256 KiB piece length. Per-peer throughput is therefore
 `piece_length / RTT` however many peers connect, and adding peers is the only
 lever the client has. `bench-seeders.sh` pulls it directly.
 
-Release build, store on ext4, 128 MiB, median of three runs:
+Release build, store on ext4, 128 MiB, median of three runs — and then the whole
+sweep run twice, because a single sweep turns out not to be worth much:
 
 | seeders | rate | vs 1 peer |
 | ---: | ---: | ---: |
-| 1 | 6.1 MB/s | 1.0x |
-| 2 | 16.3 MB/s | 2.7x |
-| 4 | 33.2 MB/s | 5.4x |
-| 8 | 44.5 MB/s | 7.3x |
-| 16 | 143.6 MB/s | 23.4x |
-| 32 | 152.0 MB/s | 24.8x |
+| 1 | ~6 MB/s | 1.0x |
+| 2 | ~16 MB/s | 2.6x |
+| 4 | ~34 MB/s | 5.7x |
+| 8 | ~43 MB/s | 7.2x |
+| 16 | 144–177 MB/s | ~25x |
+| 32 | 152–201 MB/s | ~30x |
 
-**Nothing plateaus**, but the last two rows are floors rather than measurements:
-at 128 MiB those arms finish in under a second and the timer starts at process
-launch, so a fixed startup cost is being divided into a shrinking transfer. At
-512 MiB the same arms report 155 and 184 MB/s. The eight-peer arm measures the
-same either way — 44.5 against 44.9 — which is what says the shorter payload is
-sound everywhere above a second.
+**Nothing plateaus.** Two sweeps agree within about 5% up to eight peers, which
+is why those rows are quoted to two figures and no more. Past that they do not
+agree at all: the sixteen- and thirty-two-peer arms vary by 9–22% between
+identical runs, so they are given as ranges.
+
+Two reasons, and both are about the harness rather than the client. At 128 MiB
+those arms finish in under a second while the timer starts at process launch, so
+a fixed startup cost is being divided into a shrinking transfer — at 512 MiB the
+same arms report 155–177 and 184–201. And the wide arms run 33 processes on 20
+cores, with the seeders competing against the leecher they are feeding. The
+eight-peer arm is the last one that means what it says.
 
 The disk is not the limit. `write_whole_piece` — sixteen blocks plus the bitfield
-update, the real cost of a completed piece — runs at 977 MB/s on ext4, some two
-hundred times faster than the client can fill it. What matters there is the
-spread rather than the median: `read_block` is 12 µs typically and 10.3 ms at its
-worst, because most reads are served from the page cache and the occasional one
-is a real seek. That is why the read path stays on a blocking thread pool, and it
-is the figure that counts when seeding something too large to cache.
+update, the real cost of a completed piece — runs at 235–268 µs on ext4, around
+1 GB/s, which is two orders of magnitude faster than the client can fill it. What
+matters there is the spread rather than the median: `read_block` is 12–18 µs
+typically and 9–10 ms at its worst, because most reads are served from the page
+cache and the occasional one is a real seek. That is why the read path stays on a
+blocking thread pool, and it is the figure that counts when seeding something too
+large to cache.
 
 ### Reading these honestly
 
@@ -190,24 +197,33 @@ is the figure that counts when seeding something too large to cache.
   visible at all; since the per-piece flush was removed, tmpfs and ext4 agree
   within a few percent, but that was a 5x difference until recently and nothing
   guarantees it stays closed.
+- **Know which numbers reproduce.** Run the same bench twice on the same quiet
+  machine and `hash_piece` lands within 1%, because it is pure CPU. Everything
+  that touches the disk moves by 12–55% — `read_block` was 11.8 µs one run and
+  18.3 µs the next. Quote a disk figure to more than two significant figures and
+  you are reporting the page cache's mood.
 - **A microbenchmark only says a *function* got faster.** Whether a *download*
   got faster is a separate question with a separate answer. Removing the
-  per-piece flush took `write_whole_piece` from 10.3 ms to 268 µs and moved the
-  eight-peer arm from 19.5 to 44.5 MB/s — but an earlier disk change was worth
-  2.8x on the bench and nothing at all end to end.
-- **Re-run on a quiet machine.** Figures shift about 2x under background load,
-  and the wide arms run 33 processes on 20 cores with the seeders competing
-  against the leecher they feed.
-- **Not re-measured since the durability change:** the live-swarm and
-  HTTP-mirror figures below. They need a real network and vary ±20% between
-  runs, so they are the old numbers and the comparison they support is stale
-  until somebody re-runs it.
+  per-piece flush is big enough to clear the noise by a wide margin — a 2.8 ms
+  `set_bitfield` became roughly 10 µs, and the eight-peer arm went from 19.5 to
+  ~43 MB/s — but an earlier disk change was worth 2.8x on the bench and nothing
+  at all end to end.
+- **Only trust a difference bigger than the spread.** Two identical sweeps
+  disagree by 5% up to eight peers and by up to 22% above it, so anything under
+  about a third is not a result yet.
+- **The chart below is a dated snapshot**, kept because it records a real
+  measurement rather than because it is current. All four of its bars come from
+  one session on a real network, before the durability change; the loopback bar
+  in particular is now closer to 6 MB/s. Re-running it means re-running all four
+  together — splicing one fresh bar into it would break the only thing that
+  makes the comparison meaningful.
 
-<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 6.1 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
+<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
 
 | | rate | how it was measured |
 | --- | ---: | --- |
 | What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
+| dhaar, one peer | 4.3 MB/s | two instances over loopback — ~6 MB/s today |
 | dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, ±20% between runs |
 | One HTTP stream | 0.5 MB/s | single request to the same mirror |
 
