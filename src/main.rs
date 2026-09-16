@@ -1,9 +1,37 @@
 use dhaar_torrent::{Download, config::get_configuration};
 use tracing::{error, info};
 
+/// Installs the log formatter, and the tokio-console layer alongside it when
+/// the `console` feature is on.
+///
+/// Layered rather than swapped: the console wants the runtime's task spans and
+/// the terminal wants the client's own events, and replacing one subscriber
+/// with the other would mean giving up the logs exactly when they are most
+/// worth having. `RUST_LOG` still governs the terminal half only, so turning
+/// the console on does not quieten anything.
+fn init_tracing() {
+    #[cfg(feature = "console")]
+    {
+        use tracing_subscriber::{
+            layer::{Layer, SubscriberExt},
+            util::SubscriberInitExt,
+        };
+
+        tracing_subscriber::registry()
+            .with(console_subscriber::spawn())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::EnvFilter::from_default_env()),
+            )
+            .init();
+    }
+    #[cfg(not(feature = "console"))]
+    tracing_subscriber::fmt::init();
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let config = match get_configuration() {
         Ok(config) => config,

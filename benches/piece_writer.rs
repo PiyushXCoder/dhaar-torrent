@@ -39,9 +39,14 @@ fn runtime() -> &'static Runtime {
 fn writer() -> &'static Mutex<DiskPieceWriter> {
     static WRITER: OnceLock<Mutex<DiskPieceWriter>> = OnceLock::new();
     WRITER.get_or_init(|| {
-        let mut w = DiskPieceWriter::new(TOTAL, &"bench".to_string(), &None, &None, [7u8; 20]);
+        let mut w =
+            DiskPieceWriter::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
+        // The store is always fresh — `main` runs from a directory named after
+        // this process — so `initialize` lays it out and never reaches the
+        // repair loop these hashes feed. They still have to number `PIECES`:
+        // the writer checks the count against its own geometry.
         runtime()
-            .block_on(w.initialize(BITFIELD_LEN as u32))
+            .block_on(w.initialize(vec![[0u8; 20]; PIECES as usize]))
             .unwrap();
         Mutex::new(w)
     })
@@ -76,9 +81,7 @@ fn write_block(bencher: divan::Bencher) {
         .with_inputs(|| vec![0xABu8; BLOCK as usize])
         .bench_values(|data| {
             let mut w = writer().lock().unwrap();
-            runtime()
-                .block_on(w.write(next_piece(), 0, PIECE, data))
-                .unwrap()
+            runtime().block_on(w.write(next_piece(), 0, data)).unwrap()
         });
 }
 
@@ -88,9 +91,7 @@ fn write_block(bencher: divan::Bencher) {
 fn read_block(bencher: divan::Bencher) {
     bencher.counter(BytesCount::new(BLOCK)).bench(|| {
         let w = writer().lock().unwrap();
-        runtime()
-            .block_on(w.read(next_piece(), 0, PIECE, BLOCK))
-            .unwrap()
+        runtime().block_on(w.read(next_piece(), 0, BLOCK)).unwrap()
     });
 }
 
@@ -115,7 +116,7 @@ fn write_whole_piece(bencher: divan::Bencher) {
         let piece = next_piece();
         runtime().block_on(async {
             for block in 0..(PIECE / BLOCK) {
-                w.write(piece, block * BLOCK, PIECE, vec![0xABu8; BLOCK as usize])
+                w.write(piece, block * BLOCK, vec![0xABu8; BLOCK as usize])
                     .await
                     .unwrap();
             }

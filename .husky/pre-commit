@@ -1,5 +1,14 @@
 #!/bin/sh
 set -e
+
+# `--workspace` on everything: this repo's root is itself a package, so a bare
+# `cargo clippy` or `cargo test` checks only the root and silently skips
+# `crates/*`. That is not hypothetical -- a commit adding a `DownloadState`
+# variant passed this hook while leaving `dhaar-gui` unable to compile, because
+# the hook never built it.
+#
+# `--all-targets` so benches and test binaries are checked too; they use the
+# same APIs and break the same way.
 cargo fmt --all -- --check
-cargo clippy
-cargo test --quiet || echo "warning: tests failing (not blocking commit)"
+cargo clippy --workspace --all-targets
+cargo test --workspace --quiet || echo "warning: tests failing (not blocking commit)"

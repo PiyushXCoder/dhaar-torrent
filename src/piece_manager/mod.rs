@@ -36,6 +36,9 @@ where
     /// Republished whenever a piece verifies. Only this loop writes it, so
     /// every value it carries is of one instant.
     progress: watch::Sender<PieceProgress>,
+    /// Set once `finalize` has written the payload out. Only this loop reads
+    /// or writes it, so it needs no synchronisation of its own.
+    extracted: bool,
     _info_hash: [u8; 20],
 }
 
@@ -122,6 +125,7 @@ where
             piece_events: channel::new_piece_event_channel(),
             stats,
             progress,
+            extracted: false,
             _info_hash: info_hash,
         }
     }
@@ -132,7 +136,7 @@ where
     ) {
         let bitfield = self
             .piece_writer
-            .initialize(self.bitfield().0.len() as u32)
+            .initialize(self.pieces.iter().map(|p| p.hash).collect())
             .await
             .unwrap();
         if let Some(bitfield) = bitfield {
@@ -505,7 +509,7 @@ where
         };
         let offset = block_index as u64 * block_length;
         self.piece_writer
-            .write(piece_index, offset, self.piece_length, block_data)
+            .write(piece_index, offset, block_data)
             .await
             .unwrap(); // TODO: handle errors
         if let Some(blocks) = piece.blocks.as_mut()
@@ -532,7 +536,7 @@ where
             }
             let data = self
                 .piece_writer
-                .read(piece_index, 0, self.piece_length, piece_length)
+                .read(piece_index, 0, piece_length)
                 .await
                 .unwrap();
             let hash: [u8; 20] = sha1::Sha1::digest(&data).into();
@@ -559,18 +563,20 @@ where
                 .send(channel::PieceEvent::PieceComplete { piece_index });
 
             if self.is_completed() {
+                // The publish above said every piece was verified, which is
+                // where `Finalizing` begins. Extraction copies the whole
+                // store, so subscribers sit in that state for as long as it
+                // takes; the republish below is what ends it.
                 self.piece_writer.finalize().await.unwrap();
+                self.extracted = true;
+                self.publish_progress();
             }
         }
     }
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
         let piece_size = self.piece_size(piece_index);
-        let Ok(data) = self
-            .piece_writer
-            .read(piece_index, 0, self.piece_length, piece_size)
-            .await
-        else {
+        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -597,6 +603,7 @@ where
                 .sum(),
             total_bytes: self.total_length,
             bitfield: self.bitfield(),
+            extracted: self.extracted,
         });
     }
 
@@ -652,7 +659,7 @@ mod tests {
 
         async fn initialize(
             &mut self,
-            _bitfield_length: u32,
+            _piece_hashes: Vec<[u8; 20]>,
         ) -> Result<Option<Bitfield>, Self::Error> {
             Ok(None)
         }
@@ -661,7 +668,6 @@ mod tests {
             &self,
             piece_index: u32,
             piece_offset: u64,
-            _piece_length: u64,
             length: u64,
         ) -> Result<Vec<u8>, Self::Error> {
             let mut out = self
@@ -677,7 +683,6 @@ mod tests {
             &mut self,
             piece_index: u32,
             piece_offset: u64,
-            _piece_length: u64,
             data: Vec<u8>,
         ) -> Result<(), Self::Error> {
             self.writes += 1;

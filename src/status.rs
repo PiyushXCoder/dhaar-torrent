@@ -148,6 +148,11 @@ pub struct PieceProgress {
     pub total_bytes: u64,
     /// One bit per piece, set for the pieces we can serve.
     pub bitfield: Bitfield,
+    /// Whether the payload has been written out of the store into its real
+    /// shape. Carried here rather than inferred from the piece count because
+    /// nothing else can know it: every piece can be verified and on disk while
+    /// the extracted file does not exist yet.
+    pub extracted: bool,
 }
 
 impl Default for PieceProgress {
@@ -158,6 +163,7 @@ impl Default for PieceProgress {
             verified_bytes: 0,
             total_bytes: 0,
             bitfield: Bitfield(Vec::new()),
+            extracted: false,
         }
     }
 }
@@ -183,7 +189,14 @@ pub enum DownloadState {
     #[default]
     Starting,
     Downloading,
-    /// Everything is on disk; the only traffic left is what we serve.
+    /// Every piece is verified, but the payload is still being written out of
+    /// the store into the files the torrent describes. Its own state because
+    /// it is not instant: the store is copied whole, so this lasts about as
+    /// long as writing the download again, and a large torrent spends minutes
+    /// here looking finished while the file it names does not yet exist.
+    Finalizing,
+    /// Everything is on disk in its real shape; the only traffic left is what
+    /// we serve.
     Seeding,
 }
 

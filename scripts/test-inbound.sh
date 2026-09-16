@@ -116,7 +116,7 @@ PYEOF
 # `pnpx create-torrent` ignores its own -a and -l flags here and writes a UDP
 # announce, which this client does not speak, so the file is built directly.
 #
-# A .dhaar store is [payload][bitfield][info_hash]. Handing the seeder a
+# A .dhaar store is [payload][bitfield][info_hash][flags]. Handing the seeder a
 # complete one makes it resume at 100% without ever needing a peer.
 
 cat > "$WORK/mkfixture.py" <<'PYEOF'
@@ -155,6 +155,10 @@ with open(os.path.join(work, 'seeder', 'payload.bin.dhaar'), 'wb') as f:
     f.write(payload)
     f.write(bitfield)
     f.write(hashlib.sha1(benc(info)).digest())
+    # The flag byte. Bit 0 is the clean bit, set here because this store is
+    # being handed over as a tidy exit -- the client then trusts the bitfield
+    # above instead of re-hashing every piece behind it.
+    f.write(b'\x01')
 
 print(len(pieces))
 PYEOF
@@ -202,9 +206,15 @@ echo "starting leecher on :$LEECHER_PORT (holds nothing)"
     ../test.torrent -c ../empty.toml -l "$LEECHER_PORT" ) > "$WORK/leecher.log" 2>&1 &
 LEECHER_PID=$!
 
+# Wait on the output file rather than on "Seeding 100.0%". Progress reaches
+# 100% when the last piece verifies, which is before `finalize` has copied the
+# payload out of the store, and nothing the client logs marks that copy as
+# done. Waiting on the log alone therefore races the copy: it is won at 4 MiB
+# and lost at 64, which reads as a payload mismatch against a file that is
+# merely still being written.
 echo "waiting for transfer (timeout ${TIMEOUT}s)"
 for _ in $(seq $((TIMEOUT * 10))); do
-    grep -q "Seeding 100.0%" "$WORK/leecher.log" 2>/dev/null && break
+    [ "$(stat -c %s "$WORK/leecher/payload.bin" 2>/dev/null)" = "$PAYLOAD_SIZE" ] && break
     sleep 0.1
 done
 
@@ -229,6 +239,15 @@ grep -q "Seeding 100.0%" "$WORK/leecher.log" \
 pass "leecher reached 100%"
 
 [ -f "$WORK/leecher/payload.bin" ] || fail "leecher wrote no output file"
+
+# Checked before the hash so a partial file says so. Comparing digests first
+# would report "payload mismatch" for a file that is simply short, which sends
+# you looking for corruption that is not there.
+size=$(stat -c %s "$WORK/leecher/payload.bin")
+[ "$size" = "$PAYLOAD_SIZE" ] \
+    || fail "output file is $size of $PAYLOAD_SIZE bytes; finalize did not finish within ${TIMEOUT}s"
+pass "the whole payload was written out"
+
 want=$(sha256sum < "$WORK/payload.bin" | cut -d' ' -f1)
 got=$(sha256sum < "$WORK/leecher/payload.bin" | cut -d' ' -f1)
 [ "$want" = "$got" ] || fail "payload mismatch: want $want, got $got"

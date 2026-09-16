@@ -8,7 +8,7 @@ A torrent client written in Rust. Unserious. Built for fun.
 
 ## Status
 
-~60% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to 8 outstanding requests per peer), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout. The last piece of a torrent is short, and its block count, request lengths, hash check and disk reads are all sized to it rather than to the full piece length.
+~60% complete. Bencode codec, torrent file parsing, tracker announce, and the peer wire protocol are done. Downloading works end to end: peers are discovered over HTTP trackers, connections are handshaked and framed with a `tokio-util` codec, blocks are requested with pipelining (up to one piece's worth of outstanding requests per peer — sixteen at a 256 KiB piece length), completed pieces are SHA-1 verified and written to disk, and the finished download is split into its final file layout. The last piece of a torrent is short, and its block count, request lengths, hash check and disk reads are all sized to it rather than to the full piece length.
 
 The tail of a download no longer stalls behind one slow peer: once every remaining piece is spoken for, the same blocks are requested from several peers at once and the losers are cancelled as soon as somebody else delivers. Finished pieces are announced to every connected peer with `Have`, and the tracker is told the real `uploaded`/`downloaded`/`left` figures along with `started` and `completed` events.
 
@@ -49,7 +49,7 @@ proof that an accepted connection carried it.
 cargo bench                      # divan; add a filter, e.g. cargo bench -- write_
 ```
 
-<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, the client's own no-network ceiling is 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
+<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 6.1 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
 
 The number that matters is how much of the link we actually use, so that is what
 the client is measured against.
@@ -57,7 +57,7 @@ the client is measured against.
 | | rate | how it was measured |
 | --- | ---: | --- |
 | What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
-| dhaar, own ceiling | 4.3 MB/s | seeder and leecher on one machine over loopback, 64 MiB |
+| dhaar, one peer | 6.1 MB/s | seeder and leecher on one machine over loopback, 128 MiB |
 | dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, varies ±20% between runs |
 | One HTTP stream | 0.5 MB/s | single request to the same mirror |
 
@@ -65,44 +65,120 @@ the client is measured against.
 stream 5x is BitTorrent working as intended — many peers outrunning one server —
 but 2.5 against 9.9 is four times the throughput sitting unclaimed.
 
-The loopback row is what rules out the network as the culprit. Two instances on
-one machine, no latency, warm page cache, and it still stops at 4.3 MB/s. That
-is the client's own ceiling, and it is *below* what the link offers, so the
-bottleneck is our own bookkeeping rather than anything outside the process. It
-works out to roughly 3.8 ms per 16 KiB block, spent on four actor round-trips
-that all funnel through the single-task piece manager.
+The loopback row is one peer, and one peer's limit is not the client's. Two
+instances on one machine, no latency, warm page cache, and a single connection
+still stops at about 6 MB/s — roughly 2.7 ms per 16 KiB block, spent on four
+actor round-trips that all funnel through the piece manager.
 
-Two design decisions account for it. A peer may hold only one piece at a time,
+One design decision sets that number. A peer may hold only one piece at a time,
 which caps its outstanding requests at one piece's worth of blocks — sixteen
-here — so per-peer throughput is `piece_length / RTT` no matter how many peers
-connect. And every block costs those four round-trips through one task, which is
-the same saturation that makes the piece-event broadcast overflow under load.
+here — so per-peer throughput is `piece_length / RTT` however many peers
+connect. Loopback RTT is microseconds and a real peer's is tens of
+milliseconds, which is why the live swarm sits so far below the loopback row.
+Against that cap, adding peers is the only lever the client has.
+
+#### Scaling with peers
+
+`scripts/bench-seeders.sh` pulls that lever directly: N seeders on loopback,
+each resuming an already-complete store, and a leecher timed from launch to
+finished payload. Release build, 128 MiB, median of three runs, store on ext4.
+
+| seeders | rate | vs 1 peer | per peer |
+| ---: | ---: | ---: | ---: |
+| 1 | 6.1 MB/s | 1.0x | 6.1 MB/s |
+| 2 | 16.3 MB/s | 2.7x | 8.2 MB/s |
+| 4 | 33.2 MB/s | 5.4x | 8.3 MB/s |
+| 8 | 44.5 MB/s | 7.3x | 5.6 MB/s |
+| 16 | 143.6 MB/s | 23.4x | 9.0 MB/s |
+| 32 | 152.0 MB/s | 24.8x | 4.8 MB/s |
+
+**Nothing plateaus.** Throughput is still climbing at 32 peers, twenty-five
+times what one peer manages. Per-peer rate holding through four peers is the
+`piece_length / RTT` cap behaving as advertised; past that each new connection
+is worth less than the last, and none of them is worth nothing.
+
+The last two rows are floors, not measurements. At 128 MiB those arms finish in
+under a second, and the timer starts at process launch — so a fixed cost of
+startup, announce and handshakes is being divided into a shrinking transfer. At
+512 MiB the same arms report 155 and 184 MB/s. The eight-peer arm measures the
+same either way (44.5 against 44.9), which is what says the shorter payload is
+sound everywhere above a second.
+
+The store used to live in tmpfs here, because the disk arrived first and
+drowned out the client. That is no longer true, and the reason is worth
+recording: the same arms on tmpfs now give 6.0, 16.4, 34.2 and 47.0 MB/s
+through eight peers — within a few percent of ext4 at every point. Real storage
+and a RAM disk are no longer distinguishable from inside this client, so there
+is one table where there used to be two.
+
+Two changes account for the distance from the previous figures, which topped out
+at 20.5 MB/s on ext4:
+
+- **removing the per-piece flush** (see below) lifted a ceiling that sat at
+  25 MB/s and looked exactly like a disk being slow
+- **widening the request window** from eight blocks to a piece's worth of
+  sixteen is worth about 12% at four peers on its own — 30.5 against 34.2 MB/s
+  measured with the constant put back
+
+The second is smaller than it looks like it should be, because the window can
+only ever reach the block count of one piece however high the constant goes.
 
 #### Component costs
 
 None of these are the limit, which is the useful thing to know about them. They
 are measured against the real `DiskPieceWriter` rather than a model of it, in a
-release build, medians over 100 samples.
+release build, medians over 100 samples, **store on ext4**. The benchmark
+follows `TMPDIR`, which on most machines points at tmpfs — where `fsync` has no
+device to reach and the disk path stops being a disk path at all. Run it with
+`TMPDIR` on real storage or the numbers describe memory.
 
 | what | median | throughput |
 | --- | ---: | ---: |
-| `read_block` | 10.97 µs | 1.49 GB/s |
-| `write_block` | 15.29 µs | 1.07 GB/s |
-| `set_bitfield` | 10.48 µs | — |
-| `hash_piece` | 222.7 µs | 1.18 GB/s |
-| `write_whole_piece` | 320.9 µs | 817 MB/s |
+| `set_bitfield` | 8.46 µs | — |
+| `read_block` | 11.76 µs | 1.39 GB/s |
+| `write_block` | 15.55 µs | 1.05 GB/s |
+| `hash_piece` | 214.7 µs | 1.22 GB/s |
+| `write_whole_piece` | 268.1 µs | 977 MB/s |
 
-Storage runs some three hundred times faster than the client can fill it, so
+Storage runs over two hundred times faster than the client can fill it, so
 tuning it further buys nothing. Distributions matter more than averages here:
-`read_block` has a median of 11 µs and a worst case of 1.4 ms, because most
-reads are served from the page cache and the occasional one is a real seek. That
-spread is why the read path stays on a blocking thread pool.
+`read_block` has a median of 12 µs and a worst case of 10.3 ms — a spread of
+nearly a thousand to one, because most reads are served from the page cache and
+the occasional one is a real seek. That spread is why the read path stays on a
+blocking thread pool, and it is the figure that matters when seeding something
+too large to cache.
+
+`set_bitfield` is the one to watch, because it is the one that was expensive.
+It used to sync the payload, write the claim, then sync the claim again — one
+device flush per completed piece, which measured **2.82 ms** on ext4 and capped
+`write_whole_piece` at 25 MB/s. Moving that durability to a flag byte checked on
+resume, so a claim that outlived its data is corrected on the way back in rather
+than prevented on the way out, took the same piece from 10.3 ms to 268 µs:
+
+| | before | after |
+| --- | ---: | ---: |
+| `set_bitfield` | 2.82 ms | 8.46 µs |
+| `write_whole_piece` | 10.32 ms — 25 MB/s | 268 µs — 977 MB/s |
+
+That is the largest single change the disk path has seen, and it is invisible on
+tmpfs: the same comparison there reports 7.9 µs against 9.9 µs, because a flush
+to nowhere costs nothing. A benchmark that cannot see a 39x change is not a
+benchmark yet.
 
 A microbenchmark only ever says a *function* got faster. Whether a *download*
 got faster is a separate question with a separate answer — the disk path here
 once got 2.8x faster while download speed did not move at all. Benchmark
 figures also shift about 2x with background load, so re-run on a quiet machine
 before reading anything into a difference.
+
+Where the store lives used to move them as much as any code change — the peer
+arms once topped out at 20 MB/s on ext4 against 97 MB/s in tmpfs. Removing the
+per-piece flush closed that gap, and the two substrates now agree within a few
+percent, but the habit of naming the filesystem is worth keeping: it was a 5x
+difference until recently and nothing guarantees it stays closed. The wide arms
+also run 33 processes on 20 cores, with the seeders competing against the
+leecher they are feeding, so the bottom of that table is a floor rather than a
+measurement.
 
 ### Architecture
 
@@ -133,7 +209,7 @@ Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and [`crates/
 - [x] Piece manager — piece indices, bitfield tracking, atomic cross-peer piece and block claiming, SHA-1 verification
 - [x] Request manager — per-peer connection state machine, pulled out of `peer_connection`
 - [x] Connection timeouts — handshake/bitfield timeouts, 60s idle timeout, 30s outstanding-request timeout
-- [x] Request pipelining — up to 8 outstanding block requests per peer
+- [x] Request pipelining — outstanding block requests capped at one piece's worth per peer
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
 - [x] Endgame mode — once only a few blocks remain, request them from every peer at once and `Cancel` the losers, so one slow peer can no longer hold the tail for a full 30s request timeout

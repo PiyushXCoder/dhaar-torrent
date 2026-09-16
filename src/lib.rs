@@ -96,6 +96,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
         );
         let piece_writer = DiskPieceWriter::new(
             torrent.info.total_length(),
+            torrent.info.piece_length,
             &torrent.info.name,
             &torrent.info.md5sum,
             &torrent.info.files,
@@ -293,8 +294,14 @@ async fn sample_status(
         let uploaded_bytes = stats.uploaded_bytes();
         let pieces = progress.borrow_and_update().clone();
 
-        let state = if stats.is_complete() {
+        // Extraction is checked before completeness, not after: every piece is
+        // verified for the whole of `Finalizing` too, so testing `is_complete`
+        // first would report `Seeding` throughout and the new state would be
+        // unreachable.
+        let state = if pieces.extracted {
             DownloadState::Seeding
+        } else if stats.is_complete() {
+            DownloadState::Finalizing
         } else if pieces.completed_pieces == 0 {
             DownloadState::Starting
         } else {

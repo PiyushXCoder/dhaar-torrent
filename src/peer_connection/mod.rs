@@ -70,7 +70,7 @@ impl PeerConnection {
             stats,
             peer: Peer {
                 peer_id: None,
-                address: address,
+                address,
             },
             is_outbound: false,
             piece_manager_channel_sender,
