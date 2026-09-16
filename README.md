@@ -211,25 +211,18 @@ large to cache.
 - **Only trust a difference bigger than the spread.** Two identical sweeps
   disagree by 5% up to eight peers and by up to 22% above it, so anything under
   about a third is not a result yet.
-- **The chart below is a dated snapshot**, kept because it records a real
-  measurement rather than because it is current. All four of its bars come from
-  one session on a real network, before the durability change; the loopback bar
-  in particular is now closer to 6 MB/s. Re-running it means re-running all four
-  together — splicing one fresh bar into it would break the only thing that
-  makes the comparison meaningful.
+### Against a real link
 
-<img src="assets/benchmarks.svg" alt="Download rate against available link capacity: the link allows 9.9 MB/s, a single dhaar peer over loopback gets 4.3 MB/s, a live swarm reaches 2.5 MB/s, and one HTTP stream gets 0.5 MB/s" width="720">
+Not measured since the durability change, and so not quoted here. The last
+figures — 2.5 MB/s from a live swarm against 9.9 MB/s of available link, with a
+single HTTP stream at 0.5 — were taken before the per-piece flush came out, and
+every one of them describes a slower client than this one.
 
-| | rate | how it was measured |
-| --- | ---: | --- |
-| What the link allows | 9.9 MB/s | 8 parallel HTTP range requests to an Ubuntu mirror |
-| dhaar, one peer | 4.3 MB/s | two instances over loopback — ~6 MB/s today |
-| dhaar, live swarm | 2.5 MB/s | Ubuntu ISO, ~20 peers, ±20% between runs |
-| One HTTP stream | 0.5 MB/s | single request to the same mirror |
-
-Beating a single HTTP stream 5x is BitTorrent working as intended — many peers
-outrunning one server. Against the link as a whole there was four times the
-throughput sitting unclaimed when this was last measured.
+That comparison is the one worth having, because it is the only one that says
+how much of a real connection actually gets used. Redoing it means a live swarm,
+a mirror to measure the link against, and enough runs to average out the ±20% a
+public swarm moves by — all four numbers from one session, or the comparison
+between them means nothing.
 
 ## Architecture
 
