@@ -59,15 +59,28 @@ pub struct Piece {
     hash: [u8; 20],
     pub complete: bool,
     pub requesters: Vec<Peer>,
-    /// Fed as blocks land, so a finished piece can be verified without reading
-    /// back the bytes we just wrote. SHA-1 absorbs its input strictly in
-    /// order, so this only survives while the blocks do too -- which measured
-    /// at 4096 out of 4096 pieces on one peer and 4090 on eight. A block that
-    /// arrives early drops the hasher rather than corrupting it, and the piece
-    /// falls back to hashing what the store holds.
+    /// Fed as blocks land, so a finished piece can be verified without hashing
+    /// it in one burst at the end. SHA-1 absorbs its input strictly in order,
+    /// so this only survives while the blocks do too -- which measured at 4096
+    /// out of 4096 pieces on one peer and 4090 on eight. A block that arrives
+    /// early drops the hasher rather than corrupting it, and the piece falls
+    /// back to hashing `buffer` whole.
     hasher: Option<sha1::Sha1>,
     /// The block `hasher` wants next. Meaningless once `hasher` is `None`.
     next_hashed_block: u32,
+    /// The piece as it accumulates, written out in one call once it verifies.
+    ///
+    /// Blocks used to go to the store as they arrived, which cost a trip to
+    /// the blocking pool each: 13.7us of handoff around a 4.2us write, sixteen
+    /// times per piece. Holding the piece and writing it once turns 287us of
+    /// store time into 81us.
+    ///
+    /// What that gives up is partial durability. A piece nobody is working any
+    /// more is dropped here rather than left half-written on disk, so the next
+    /// peer to take it starts from block zero instead of finishing someone
+    /// else's work. That also bounds what this costs: pieces in flight, not
+    /// pieces ever touched.
+    buffer: Option<Vec<u8>>,
 }
 
 pub struct Block {
@@ -111,6 +124,16 @@ impl Piece {
         );
         self.hasher = Some(sha1::Sha1::new());
         self.next_hashed_block = 0;
+        self.buffer = Some(vec![0u8; piece_length as usize]);
+    }
+
+    /// Forgets everything received so far. The piece is left exactly as it was
+    /// before its first block, so `ensure_initialized` builds it again.
+    fn discard_progress(&mut self) {
+        self.blocks = None;
+        self.hasher = None;
+        self.next_hashed_block = 0;
+        self.buffer = None;
     }
 }
 
@@ -138,6 +161,7 @@ where
                 requesters: Vec::new(),
                 hasher: None,
                 next_hashed_block: 0,
+                buffer: None,
             })
             .collect();
 
@@ -507,6 +531,18 @@ where
                 block.requesters.retain(|requester| *requester != peer);
             }
         }
+        // Nobody is working this piece any more, and with the blocks held in
+        // memory rather than written as they arrive, nobody can resume it
+        // either -- whatever arrived is only useful to a peer that goes on to
+        // finish it. Hand the memory back so what this costs is bounded by the
+        // pieces in flight rather than by every piece ever started.
+        //
+        // Safe because a peer only gives up a piece it has nothing pending on:
+        // `grant_anywhere` releases on `Grant::Exhausted`, which is exactly
+        // that condition.
+        if !piece.complete && piece.requesters.is_empty() {
+            piece.discard_progress();
+        }
         debug!("{}: released by {}", piece_index, peer.address);
     }
 
@@ -546,10 +582,9 @@ where
         let Some(block_length) = piece.block_length else {
             return;
         };
-        // The one point where the block is still in hand: `write` takes it by
-        // value, and hashing it here is what lets a completed piece skip
-        // reading the whole thing back. Out of order, the hasher is worthless
-        // -- drop it and let completion fall back to the store.
+        // Hash before the copy, while the block is still its own value. Out of
+        // order the hasher is worthless -- drop it, and let completion hash the
+        // assembled buffer instead.
         if piece.next_hashed_block == block_index {
             if let Some(hasher) = piece.hasher.as_mut() {
                 hasher.update(&block_data);
@@ -558,11 +593,13 @@ where
         } else {
             piece.hasher = None;
         }
-        let offset = block_index as u64 * block_length;
-        self.piece_writer
-            .write(piece_index, offset, block_data)
-            .await
-            .unwrap(); // TODO: handle errors
+        let offset = (block_index as u64 * block_length) as usize;
+        if let Some(buffer) = piece.buffer.as_mut()
+            && offset < buffer.len()
+        {
+            let end = (offset + block_data.len()).min(buffer.len());
+            buffer[offset..end].copy_from_slice(&block_data[..end - offset]);
+        }
         if let Some(blocks) = piece.blocks.as_mut()
             && let Some(block) = blocks.get_mut(block_index as usize)
         {
@@ -585,24 +622,28 @@ where
             if was_held && piece.requesters.is_empty() {
                 self.stats.piece_released();
             }
-            // The hasher has seen the whole piece exactly when every block was
-            // fed to it, in order. Anything else and the store holds the only
-            // copy known to be complete, so hash that instead.
+            // Nothing is on disk yet, so the buffer is the piece. Losing it
+            // here would mean verifying bytes we no longer have, which is not
+            // recoverable -- start the piece over instead.
             let blocks_total = piece.blocks.as_ref().map_or(0, |blocks| blocks.len()) as u32;
+            let Some(buffer) = piece.buffer.take() else {
+                warn!(
+                    "{}: completed with no buffer, fetching it again",
+                    piece_index
+                );
+                piece.discard_progress();
+                return;
+            };
+            // The hasher has seen the whole piece exactly when every block was
+            // fed to it, in order. Anything else and it is missing bytes, so
+            // hash what was assembled.
             let hash: [u8; 20] = match piece.hasher.take() {
                 Some(hasher) if piece.next_hashed_block == blocks_total => hasher.finalize().into(),
-                _ => {
-                    let data = self
-                        .piece_writer
-                        .read(piece_index, 0, piece_length)
-                        .await
-                        .unwrap();
-                    sha1::Sha1::digest(&data).into()
-                }
+                _ => sha1::Sha1::digest(&buffer).into(),
             };
             if hash != piece.hash {
                 warn!("{}: piece failed its hash check", piece_index);
-                piece.blocks = None;
+                piece.discard_progress();
                 piece.complete = false;
                 // The whole piece has to be fetched again, so everything spent
                 // on it is spent twice.
@@ -615,6 +656,13 @@ where
             self.bitfield.set_piece(piece_index, true);
             self.completed_pieces += 1;
             self.verified_bytes += piece_length;
+            // Before the claim, not after: the bitfield is what says these
+            // bytes are on disk, and a claim that outlives its data is the one
+            // ordering this file cannot get wrong.
+            self.piece_writer
+                .write(piece_index, 0, buffer)
+                .await
+                .unwrap(); // TODO: handle errors
             self.piece_writer
                 .set_bitfield(self.bitfield.clone())
                 .await
@@ -835,8 +883,8 @@ mod tests {
     }
 
     /// A block that arrives early leaves the running hash unusable, and the
-    /// piece has to fall back to hashing what the store holds. Rare, but it is
-    /// the only path where getting it wrong looks like corruption.
+    /// piece falls back to hashing the assembled buffer. Rare, but it is the
+    /// only path where getting it wrong looks like corruption.
     #[tokio::test]
     async fn out_of_order_blocks_still_verify() {
         let (first, second, whole) = two_blocks();
@@ -846,14 +894,25 @@ mod tests {
         manager.receive_block(0, 0, first, peer(1)).await;
 
         assert!(manager.pieces[0].complete, "the piece should have verified");
-        assert!(
+        assert_eq!(
             manager
                 .piece_writer
                 .reads
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0,
-            "reading the store back is the only way this piece can verify"
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the fallback hashes the buffer; nothing is on disk to read yet"
         );
+    }
+
+    /// The piece as assembled so far. Blocks are held here until the piece
+    /// verifies, so this -- not the store -- is where a test looks to see what
+    /// a block actually did.
+    fn block_in_buffer(
+        manager: &PieceManager<std::io::Error, MemoryWriter>,
+        index: u64,
+    ) -> Vec<u8> {
+        let start = (index * BLOCK_SIZE) as usize;
+        manager.pieces[0].buffer.as_ref().unwrap()[start..start + BLOCK_SIZE as usize].to_vec()
     }
 
     /// Endgame sends the same block to several peers. The copy that loses the
@@ -865,19 +924,19 @@ mod tests {
         let loser = vec![0xBB; BLOCK_SIZE as usize];
 
         manager.receive_block(0, 0, winner.clone(), peer(1)).await;
-        assert_eq!(manager.piece_writer.writes, 1);
+        assert_eq!(block_in_buffer(&manager, 0), winner);
         assert_eq!(manager.stats.wasted_bytes(), 0);
 
         manager.receive_block(0, 0, loser, peer(2)).await;
 
         assert_eq!(
-            manager.piece_writer.writes, 1,
-            "the losing copy was written to disk again"
+            block_in_buffer(&manager, 0),
+            winner,
+            "the losing copy overwrote the winner's bytes"
         );
         assert_eq!(
-            manager.piece_writer.blocks.get(&(0, 0)),
-            Some(&winner),
-            "the losing copy overwrote the winner's bytes"
+            manager.piece_writer.writes, 0,
+            "an unfinished piece has no business touching the store"
         );
         assert_eq!(
             manager.stats.wasted_bytes(),
@@ -889,15 +948,59 @@ mod tests {
     /// Control for the guard above: it must not swallow a block that nobody
     /// has delivered yet.
     #[tokio::test]
-    async fn first_copy_of_a_block_is_written() {
+    async fn first_copy_of_a_block_is_stored() {
         let mut manager = manager();
-        manager
-            .receive_block(0, 1, vec![0xCC; BLOCK_SIZE as usize], peer(1))
-            .await;
+        let block = vec![0xCC; BLOCK_SIZE as usize];
+        manager.receive_block(0, 1, block.clone(), peer(1)).await;
 
-        assert_eq!(manager.piece_writer.writes, 1);
+        assert_eq!(block_in_buffer(&manager, 1), block);
         assert_eq!(manager.stats.wasted_bytes(), 0);
         assert!(manager.pieces[0].blocks.as_ref().unwrap()[1].complete);
+    }
+
+    /// A piece nobody is working any more gives its memory back, and with it
+    /// everything received so far: nothing was written, so there is nothing
+    /// for the next peer to resume from.
+    #[tokio::test]
+    async fn releasing_the_last_requester_discards_the_piece() {
+        let mut manager = manager();
+        let holder = peer(1);
+        manager.pieces[0].requesters.push(holder);
+        manager
+            .receive_block(0, 0, vec![0xAA; BLOCK_SIZE as usize], holder)
+            .await;
+        assert!(manager.pieces[0].buffer.is_some());
+
+        manager.release(0, holder);
+
+        assert!(
+            manager.pieces[0].buffer.is_none(),
+            "an abandoned piece must not hold onto its memory"
+        );
+        assert!(
+            manager.pieces[0].blocks.is_none(),
+            "its blocks cannot outlive the bytes they describe"
+        );
+    }
+
+    /// The counterpart: while somebody is still working the piece, the bytes
+    /// have to stay.
+    #[tokio::test]
+    async fn releasing_one_of_two_requesters_keeps_the_piece() {
+        let mut manager = manager();
+        let (leaving, staying) = (peer(1), peer(2));
+        manager.pieces[0].requesters.push(leaving);
+        manager.pieces[0].requesters.push(staying);
+        manager
+            .receive_block(0, 0, vec![0xAA; BLOCK_SIZE as usize], leaving)
+            .await;
+
+        manager.release(0, leaving);
+
+        assert!(
+            manager.pieces[0].buffer.is_some(),
+            "a piece somebody else is still working must keep its bytes"
+        );
     }
 
     /// The early return must still clear the loser's claim: it will never
