@@ -39,6 +39,17 @@ where
     /// Set once `finalize` has written the payload out. Only this loop reads
     /// or writes it, so it needs no synchronisation of its own.
     extracted: bool,
+    /// The bitfield, kept in step with `pieces` rather than rebuilt from it.
+    /// Exactly one bit changes when a piece verifies, and every caller that
+    /// wants the bitfield -- the progress watch, the on-disk claim, a peer
+    /// asking what we hold -- runs on that same completion, so rebuilding it
+    /// there walked every piece once per piece.
+    bitfield: Bitfield,
+    /// Running totals over `pieces`, maintained for the same reason. They do
+    /// not start at zero on a resume, which is why `start` seeds them once the
+    /// store has said what it already holds.
+    completed_pieces: u32,
+    verified_bytes: u64,
     _info_hash: [u8; 20],
 }
 
@@ -106,7 +117,7 @@ where
         progress: watch::Sender<PieceProgress>,
         info_hash: [u8; 20],
     ) -> Self {
-        let piceces = piece_hashes
+        let piceces: Vec<Piece> = piece_hashes
             .chunks(20)
             .map(|hash| Piece {
                 hash: hash.to_vec().try_into().unwrap(),
@@ -117,6 +128,8 @@ where
             })
             .collect();
 
+        let bitfield = Bitfield(vec![0u8; piceces.len().div_ceil(8)]);
+
         Self {
             piece_length,
             total_length,
@@ -126,6 +139,9 @@ where
             stats,
             progress,
             extracted: false,
+            bitfield,
+            completed_pieces: 0,
+            verified_bytes: 0,
             _info_hash: info_hash,
         }
     }
@@ -144,6 +160,7 @@ where
                 piece.complete = bitfield.has_piece(index as u32);
             }
         }
+        self.reseed_cached_views();
 
         self.stats
             .set_totals(self.total_pieces(), self.total_length);
@@ -238,19 +255,28 @@ where
     /// loop, so nothing can complete between the two.
     fn bitfield_snapshot(&self) -> channel::BitfieldSnapshot {
         channel::BitfieldSnapshot {
-            bitfield: self.bitfield(),
+            bitfield: self.bitfield.clone(),
             events: self.piece_events.subscribe(),
         }
     }
 
-    fn bitfield(&self) -> Bitfield {
-        let mut bytes = vec![0u8; self.pieces.len().div_ceil(8)];
-        for (index, piece) in self.pieces.iter().enumerate() {
-            if piece.complete {
-                bytes[index / 8] |= 1 << (7 - (index % 8));
+    /// Recomputes the cached views from `pieces`. Walking every piece is the
+    /// right thing to do exactly once, when a resume has just decided what the
+    /// store holds; from there they are carried forward a bit at a time.
+    fn reseed_cached_views(&mut self) {
+        let mut bitfield = Bitfield(vec![0u8; self.pieces.len().div_ceil(8)]);
+        let mut completed_pieces = 0;
+        let mut verified_bytes = 0;
+        for index in 0..self.total_pieces() {
+            if self.pieces[index as usize].complete {
+                bitfield.set_piece(index, true);
+                completed_pieces += 1;
+                verified_bytes += self.piece_size(index);
             }
         }
-        Bitfield(bytes)
+        self.bitfield = bitfield;
+        self.completed_pieces = completed_pieces;
+        self.verified_bytes = verified_bytes;
     }
 
     fn is_interesting(&self, bitfield: &Bitfield) -> bool {
@@ -552,8 +578,11 @@ where
             }
             debug!("{}: piece complete, hash verified", piece_index);
             piece.complete = true;
+            self.bitfield.set_piece(piece_index, true);
+            self.completed_pieces += 1;
+            self.verified_bytes += piece_length;
             self.piece_writer
-                .set_bitfield(self.bitfield())
+                .set_bitfield(self.bitfield.clone())
                 .await
                 .unwrap();
             self.stats.piece_verified(piece_length);
@@ -592,17 +621,11 @@ where
     /// than a stream of identical values.
     fn publish_progress(&self) {
         let _ = self.progress.send(PieceProgress {
-            completed_pieces: self.pieces.iter().filter(|piece| piece.complete).count() as u32,
+            completed_pieces: self.completed_pieces,
             total_pieces: self.total_pieces(),
-            verified_bytes: self
-                .pieces
-                .iter()
-                .enumerate()
-                .filter(|(_, piece)| piece.complete)
-                .map(|(index, _)| self.piece_size(index as u32))
-                .sum(),
+            verified_bytes: self.verified_bytes,
             total_bytes: self.total_length,
-            bitfield: self.bitfield(),
+            bitfield: self.bitfield.clone(),
             extracted: self.extracted,
         });
     }
@@ -635,7 +658,7 @@ where
     }
 
     fn is_completed(&self) -> bool {
-        self.pieces.iter().all(|piece| piece.complete)
+        self.completed_pieces == self.total_pieces()
     }
 }
 
