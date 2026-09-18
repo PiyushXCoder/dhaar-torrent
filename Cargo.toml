@@ -60,6 +60,10 @@ husky-rs = "0.3.3"
 name = "piece_writer"
 harness = false
 
+[[bench]]
+name = "piece_manager"
+harness = false
+
 # Optimised like `release`, but keeps the symbols a profiler needs to name a
 # frame. Measuring a debug build answers a question nobody asked: it is the
 # same code with the optimiser switched off, and the shape of where the time
