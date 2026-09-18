@@ -335,17 +335,45 @@ impl PieceWriter for DiskPieceWriter {
     }
 
     async fn set_bitfield(&mut self, bitfield: Bitfield) -> Result<(), Self::Error> {
+        let layout = self.layout();
+        let expected = layout.bitfield_length() as usize;
+        if bitfield.0.len() != expected {
+            return Err(std::io::Error::other(format!(
+                "bitfield is {} bytes, store expects {expected}",
+                bitfield.0.len()
+            )));
+        }
         let file = self.handle()?;
-        let offset = self.layout().bitfield_at();
+        let offset = layout.bitfield_at();
         spawn_blocking(move || {
-            // Deliberately unsynced, like `write`. A barrier here would order
-            // the payload before the claim, but it costs a device flush per
-            // piece — the dominant term in download throughput. Instead the
-            // claim is only a hint: `initialize` re-hashes what the bitfield
-            // claims whenever the flag byte says the last exit was unclean, so
-            // a claim that outlives its data is corrected on the way back in
-            // rather than prevented on the way out.
-            file.write_all_at(&bitfield.0, offset)?;
+            // Read-modify-write rather than a blind overwrite. The claim is
+            // only ever made stronger: a piece that is on disk stays claimed.
+            // Writing the caller's snapshot wholesale would let a stale one
+            // clear a bit somebody else had just set, and the bit it cleared
+            // is a verified piece the client would then refetch.
+            //
+            // Cheap enough to do unconditionally -- the bitfield is one byte
+            // per eight pieces, so a 64 GiB torrent at 256 KiB pieces reads
+            // and writes 32 KiB here, once per completed piece.
+            //
+            // The one place that must *clear* bits is `initialize`, repairing
+            // a store whose last exit was unclean. It writes the corrected
+            // bitfield straight to the file rather than coming through here,
+            // and it has to keep doing so -- routed through this merge, a
+            // repair could never drop a claim it had just found to be false.
+            let mut stored = vec![0u8; expected];
+            file.read_exact_at(&mut stored, offset)?;
+            for (byte, incoming) in stored.iter_mut().zip(bitfield.0.iter()) {
+                *byte |= *incoming;
+            }
+            // Deliberately unsynced. A barrier here would order the payload
+            // before the claim, but it costs a device flush per piece -- the
+            // dominant term in download throughput. Instead the claim is only
+            // a hint: `initialize` re-hashes what the bitfield claims whenever
+            // the flag byte says the last exit was unclean, so a claim that
+            // outlives its data is corrected on the way back in rather than
+            // prevented on the way out.
+            file.write_all_at(&stored, offset)?;
             Ok(())
         })
         .await
@@ -399,4 +427,85 @@ impl PieceWriter for DiskPieceWriter {
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store laid out in a directory of its own, since `DiskPieceWriter`
+    /// names its file relative to the working directory.
+    async fn writer(dir: &std::path::Path, pieces: u64, piece_length: u64) -> DiskPieceWriter {
+        let mut w = DiskPieceWriter::new(
+            pieces * piece_length,
+            piece_length,
+            &dir.join("store").to_string_lossy().into_owned(),
+            &None,
+            &None,
+            [7u8; 20],
+        );
+        w.initialize(vec![[0u8; 20]; pieces as usize])
+            .await
+            .unwrap();
+        w
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dhaar-pw-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Two owners completing pieces at the same time each write the bitfield
+    /// they can see. Neither snapshot knows about the other's piece, so a
+    /// blind write would drop whichever landed first.
+    #[tokio::test]
+    async fn set_bitfield_keeps_bits_a_stale_snapshot_does_not_know_about() {
+        let dir = temp_dir("merge");
+        let mut w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+
+        let mut first = Bitfield(vec![0u8; 2]);
+        first.set_piece(0, true);
+        w.set_bitfield(first).await.unwrap();
+
+        // Built before piece 0 landed, so it claims only piece 9.
+        let mut stale = Bitfield(vec![0u8; 2]);
+        stale.set_piece(9, true);
+        w.set_bitfield(stale).await.unwrap();
+
+        // Read the region straight out of the store. Going back through
+        // `initialize` would re-verify the pieces and clear both claims, since
+        // this store's payload is zeros and its hashes are not.
+        let stored = Bitfield(read_bitfield(&dir, 16 * BLOCK_FOR_TEST, 2));
+        assert!(stored.has_piece(0), "an earlier claim was overwritten");
+        assert!(stored.has_piece(9), "the later claim was not recorded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The store checks the caller against its own geometry rather than
+    /// writing a short bitfield over whatever follows it.
+    #[tokio::test]
+    async fn set_bitfield_rejects_the_wrong_length() {
+        let dir = temp_dir("length");
+        let mut w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+
+        let err = w.set_bitfield(Bitfield(vec![0u8; 1])).await.unwrap_err();
+        assert!(
+            err.to_string().contains("store expects"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn read_bitfield(dir: &std::path::Path, offset: u64, length: usize) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::File::open(dir.join("store.dhaar")).unwrap();
+        let mut bits = vec![0u8; length];
+        file.read_exact_at(&mut bits, offset).unwrap();
+        bits
+    }
+
+    const BLOCK_FOR_TEST: u64 = 16 * 1024;
 }
