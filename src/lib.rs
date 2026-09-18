@@ -5,6 +5,7 @@ pub mod peer_connection;
 pub mod peer_explorer;
 pub mod peer_manager;
 pub mod piece_manager;
+pub mod piece_writer;
 pub mod status;
 pub mod torrent_parser;
 pub mod wire_protocol;
@@ -23,11 +24,8 @@ use crate::{
         PeerManager,
         peer_selection_strategy::{PeerSelectionStrategy, RetryAfterDelayPeerSelectionStrategy},
     },
-    piece_manager::{
-        PieceManager,
-        channel::new_piece_manager_channel,
-        piece_writer::{DiskPieceWriter, PieceWriter},
-    },
+    piece_manager::{PieceManager, channel::new_piece_manager_channel},
+    piece_writer::{DiskPieceWriter, PieceWriter},
     status::{DownloadState, DownloadStats, DownloadStatus, PieceProgress},
     torrent_parser::{TorrentParser, metadata::Torrent, parser::TorrentFileParser},
 };

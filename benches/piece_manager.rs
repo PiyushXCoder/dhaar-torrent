@@ -22,8 +22,8 @@ use dhaar_torrent::{
     piece_manager::{
         PieceManager,
         channel::{PieceManagerMessage, new_piece_manager_channel},
-        piece_writer::PieceWriter,
     },
+    piece_writer::PieceWriter,
     status::{DownloadStats, PieceProgress},
     wire_protocol::Bitfield,
 };

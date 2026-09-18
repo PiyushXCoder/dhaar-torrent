@@ -3,7 +3,6 @@ use sha1::Digest;
 use tracing::{debug, info, warn};
 
 pub mod channel;
-pub mod piece_writer;
 
 use std::sync::Arc;
 
@@ -21,7 +20,7 @@ pub const BLOCK_SIZE: u64 = 16 * 1024;
 pub struct PieceManager<E, W>
 where
     E: std::error::Error + Send + Sync + 'static,
-    W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+    W: crate::piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
     pub piece_length: u64,
     pub total_length: u64,
@@ -140,7 +139,7 @@ impl Piece {
 impl<E, W> PieceManager<E, W>
 where
     E: std::error::Error + Send + Sync + 'static,
-    W: piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+    W: crate::piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
 {
     pub fn new(
         piece_hashes: &ByteBuf,
@@ -762,7 +761,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl piece_writer::PieceWriter for MemoryWriter {
+    impl crate::piece_writer::PieceWriter for MemoryWriter {
         type Error = std::io::Error;
 
         async fn initialize(

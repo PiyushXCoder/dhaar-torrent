@@ -17,7 +17,7 @@ use sha1::Digest;
 use tokio::runtime::Runtime;
 
 use dhaar_torrent::{
-    piece_manager::piece_writer::{DiskPieceWriter, PieceWriter},
+    piece_writer::{DiskPieceWriter, PieceWriter},
     wire_protocol::Bitfield,
 };
 
