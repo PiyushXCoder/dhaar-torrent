@@ -93,7 +93,9 @@ impl PeerConnection {
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
-        let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
+        let stream = self.stream.take().unwrap();
+        stream.set_nodelay(true)?;
+        let mut framed = Framed::new(stream, WireCodec::new());
         self.handshake(&mut framed).await?;
         // The subscription comes back with the bitfield rather than being
         // taken later: anything completing in between would be missing from
