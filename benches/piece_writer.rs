@@ -127,6 +127,83 @@ fn write_whole_piece(bencher: divan::Bencher) {
     });
 }
 
+/// What the `spawn_blocking` around each write actually costs, as opposed to
+/// the write itself. `write` hands every block to the blocking pool, which is
+/// the documented thing to do with blocking I/O -- but a 16 KiB `pwrite` that
+/// lands in page cache is a short, bounded syscall, and the handoff may well
+/// cost more than the work. The gap between these two is the answer, and it is
+/// what decides whether batching, a writer task, or dropping the handoff is
+/// the right fix.
+mod handoff {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    fn file() -> &'static std::sync::Arc<std::fs::File> {
+        static F: OnceLock<std::sync::Arc<std::fs::File>> = OnceLock::new();
+        F.get_or_init(|| {
+            let path = std::env::current_dir().unwrap().join("handoff.bin");
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            f.set_len(TOTAL).unwrap();
+            std::sync::Arc::new(f)
+        })
+    }
+
+    /// The syscall on its own, no pool in the way.
+    #[divan::bench]
+    fn write_block_direct(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(BLOCK))
+            .with_inputs(|| vec![0xABu8; BLOCK as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                file().write_all_at(&data, offset).unwrap()
+            });
+    }
+
+    /// The same syscall reached the way `DiskPieceWriter::write` reaches it.
+    #[divan::bench]
+    fn write_block_spawn_blocking(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(BLOCK))
+            .with_inputs(|| vec![0xABu8; BLOCK as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                let f = file().clone();
+                runtime()
+                    .block_on(async move {
+                        tokio::task::spawn_blocking(move || f.write_all_at(&data, offset)).await
+                    })
+                    .unwrap()
+                    .unwrap()
+            });
+    }
+
+    /// A whole piece in one syscall instead of sixteen. If the handoff is the
+    /// cost, this is what batching would buy.
+    #[divan::bench]
+    fn write_whole_piece_one_call(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(PIECE))
+            .with_inputs(|| vec![0xABu8; PIECE as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                let f = file().clone();
+                runtime()
+                    .block_on(async move {
+                        tokio::task::spawn_blocking(move || f.write_all_at(&data, offset)).await
+                    })
+                    .unwrap()
+                    .unwrap()
+            });
+    }
+}
+
 /// Verification, which runs inline in the piece manager's loop. Worth watching
 /// in debug builds: it is an order of magnitude slower there.
 #[divan::bench]
