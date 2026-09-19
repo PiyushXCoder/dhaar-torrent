@@ -18,8 +18,18 @@ pub struct DownloadStats {
     uploaded_bytes: AtomicU64,
     wasted_bytes: AtomicU64,
     verified_bytes: AtomicU64,
+    /// Payload the store already held when this download started.
+    ///
+    /// Kept apart from `verified_bytes` rather than folded into it, because
+    /// that one is what this session fetched and checked, and comparing it
+    /// with `downloaded_bytes` is how waste is measured. Resumed bytes were
+    /// never received, so counting them there would make a resumed download
+    /// look like it verified more than it ever downloaded.
+    resumed_bytes: AtomicU64,
     total_bytes: AtomicU64,
     completed_pieces: AtomicU32,
+    /// Pieces the store already held, for the same reason.
+    resumed_pieces: AtomicU32,
     total_pieces: AtomicU32,
     in_flight_pieces: AtomicU32,
     hash_failures: AtomicU32,
@@ -56,6 +66,13 @@ impl DownloadStats {
     pub fn set_totals(&self, pieces: u32, bytes: u64) {
         self.total_pieces.store(pieces, Relaxed);
         self.total_bytes.store(bytes, Relaxed);
+    }
+
+    /// Records what a resumed store was found to hold. Called once, before any
+    /// piece of this session verifies.
+    pub fn set_resumed(&self, pieces: u32, bytes: u64) {
+        self.resumed_pieces.store(pieces, Relaxed);
+        self.resumed_bytes.store(bytes, Relaxed);
     }
 
     /// Called as a piece gains its first holder and loses its last, so this
@@ -103,8 +120,21 @@ impl DownloadStats {
     }
 
     /// Payload still missing — the tracker's `left` parameter.
+    /// Everything we hold: what this session verified, plus what the store
+    /// already had. Resuming at 90% and reporting the whole torrent as still
+    /// wanted is not only wrong on screen -- it is what a tracker is told in
+    /// `left=`.
+    pub fn held_bytes(&self) -> u64 {
+        self.verified_bytes() + self.resumed_bytes.load(Relaxed)
+    }
+
+    /// Pieces we hold, from this session and from the store together.
+    pub fn held_pieces(&self) -> u32 {
+        self.completed_pieces() + self.resumed_pieces.load(Relaxed)
+    }
+
     pub fn remaining_bytes(&self) -> u64 {
-        self.total_bytes().saturating_sub(self.verified_bytes())
+        self.total_bytes().saturating_sub(self.held_bytes())
     }
 
     pub fn completed_pieces(&self) -> u32 {
@@ -131,7 +161,7 @@ impl DownloadStats {
     /// known, so an empty torrent never reads as finished at startup.
     pub fn is_complete(&self) -> bool {
         let total = self.total_pieces();
-        total > 0 && self.completed_pieces() >= total
+        total > 0 && self.held_pieces() >= total
     }
 }
 

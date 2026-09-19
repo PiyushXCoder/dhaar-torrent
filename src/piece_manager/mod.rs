@@ -126,16 +126,8 @@ where
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
-        let bitfield = self.store.initialize(self.hashes.to_vec()).await.unwrap();
-        if let Some(bitfield) = bitfield {
-            for (index, piece) in self.pieces.iter_mut().enumerate() {
-                piece.complete = bitfield.has_piece(index as u32);
-            }
-        }
-        self.reseed_cached_views();
-
-        self.stats
-            .set_totals(self.total_pieces(), self.total_length);
+        let stored = self.store.initialize(self.hashes.to_vec()).await.unwrap();
+        self.adopt_stored(stored);
         self.publish_progress();
         info!(
             "Piece manager started: {} pieces, {} bytes/piece",
@@ -218,6 +210,28 @@ where
     /// Recomputes the cached views from `pieces`. Walking every piece is the
     /// right thing to do exactly once, when a resume has just decided what the
     /// store holds; from there they are carried forward a bit at a time.
+    /// Takes on whatever the store was found to hold, and tells the shared
+    /// counters about it.
+    ///
+    /// Resumed pieces go to `set_resumed`, not through `piece_verified`: this
+    /// session never downloaded them, so counting them as work it did would
+    /// break the comparison between bytes received and bytes verified -- and
+    /// leaving them out of the counters entirely, which is what used to
+    /// happen, made a resumed download report the whole torrent as still
+    /// wanted.
+    fn adopt_stored(&mut self, stored: Option<Bitfield>) {
+        if let Some(stored) = stored {
+            for (index, piece) in self.pieces.iter_mut().enumerate() {
+                piece.complete = stored.has_piece(index as u32);
+            }
+        }
+        self.reseed_cached_views();
+        self.stats
+            .set_totals(self.total_pieces(), self.total_length);
+        self.stats
+            .set_resumed(self.completed_pieces, self.verified_bytes);
+    }
+
     fn reseed_cached_views(&mut self) {
         let mut bitfield = Bitfield(vec![0u8; self.pieces.len().div_ceil(8)]);
         let mut completed_pieces = 0;
@@ -625,6 +639,7 @@ mod tests {
             watch::Sender::new(PieceProgress::default()),
             [0u8; 20],
         );
+        manager.adopt_stored(None);
         let holder = peer(1);
         claim(&mut manager, holder);
 
@@ -640,6 +655,57 @@ mod tests {
             "extraction failed, so nothing may claim the payload was written"
         );
         assert_eq!(manager.completed_pieces, 1);
+    }
+
+    /// A resumed store is payload we already hold. Reporting it as still
+    /// wanted is not only wrong on screen -- `remaining_bytes` is what a
+    /// tracker is told in `left=`.
+    #[tokio::test]
+    async fn a_resumed_store_is_not_reported_as_still_wanted() {
+        let mut manager = manager();
+        let mut stored = Bitfield(vec![0u8; 1]);
+        stored.set_piece(0, true);
+
+        manager.adopt_stored(Some(stored));
+
+        assert_eq!(
+            manager.stats.remaining_bytes(),
+            0,
+            "a store holding the whole torrent still reported it as wanted"
+        );
+        assert!(manager.stats.is_complete());
+    }
+
+    /// Resumed pieces were not fetched this session, so they must not be
+    /// counted as work it did: `downloaded_bytes` against `verified_bytes` is
+    /// how waste is measured, and one of them never happened.
+    #[tokio::test]
+    async fn a_resumed_store_is_not_counted_as_this_sessions_work() {
+        let mut manager = manager();
+        let mut stored = Bitfield(vec![0u8; 1]);
+        stored.set_piece(0, true);
+
+        manager.adopt_stored(Some(stored));
+
+        assert_eq!(
+            manager.stats.verified_bytes(),
+            0,
+            "resumed bytes were counted as verified by this session"
+        );
+        assert_eq!(manager.stats.held_bytes(), BLOCK_SIZE * 2);
+    }
+
+    /// Nothing was held, so nothing is claimed -- the control for the two
+    /// above.
+    #[tokio::test]
+    async fn a_fresh_store_holds_nothing() {
+        let mut manager = manager();
+
+        manager.adopt_stored(None);
+
+        assert_eq!(manager.stats.remaining_bytes(), BLOCK_SIZE * 2);
+        assert_eq!(manager.stats.held_bytes(), 0);
+        assert!(!manager.stats.is_complete());
     }
 
     /// Endgame shares a piece so one slow peer cannot hold up the tail, but
