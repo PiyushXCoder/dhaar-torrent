@@ -142,7 +142,7 @@ impl Drop for PieceHold {
 
 pub struct RequestManager<W>
 where
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     pub peer: Option<Peer>,
@@ -170,7 +170,7 @@ where
     /// manager. Sharing it is safe because every access is positional and
     /// pieces occupy disjoint ranges: two connections working different pieces
     /// never address the same byte.
-    piece_writer: Arc<W>,
+    store: Arc<W>,
     /// The piece this connection is assembling, and the hash it must match.
     /// Held here rather than in the piece manager so that buffering, hashing
     /// and writing all happen on the connection's own task -- which is what
@@ -254,7 +254,7 @@ impl PieceBuffer {
 
 impl<W> RequestManager<W>
 where
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     #[allow(clippy::too_many_arguments)]
@@ -268,7 +268,7 @@ where
         outgoing_channel_sender: OutgoingChannelSender,
         piece_events: PieceEventReceiver,
         stats: Arc<DownloadStats>,
-        piece_writer: Arc<W>,
+        store: Arc<W>,
     ) -> Self {
         Self {
             peer,
@@ -288,7 +288,7 @@ where
             piece_events,
             stats,
             last_sent: time::Instant::now(),
-            piece_writer,
+            store,
             piece_buffer: None,
             pending_blocks: std::collections::VecDeque::new(),
         }
@@ -777,7 +777,7 @@ where
             return Ok(());
         }
 
-        if let Err(e) = self.piece_writer.write(piece_index, 0, buffer.bytes).await {
+        if let Err(e) = self.store.write(piece_index, 0, buffer.bytes).await {
             // Nothing was claimed, so the piece is simply still missing. Give
             // it back rather than reporting a completion the store cannot
             // back up.

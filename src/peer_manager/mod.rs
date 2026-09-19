@@ -27,7 +27,7 @@ struct Connection {
 pub struct PeerManager<S, W>
 where
     S: peer_selection_strategy::PeerSelectionStrategy + Sync + Send + 'static,
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     peer_slection_strategy: S,
@@ -41,13 +41,13 @@ where
     listening_port: u16,
     /// Handed to every connection this manager opens. The manager itself never
     /// reads or writes the store.
-    piece_writer: Arc<W>,
+    store: Arc<W>,
 }
 
 impl<S, W> PeerManager<S, W>
 where
     S: peer_selection_strategy::PeerSelectionStrategy + Sync + Send + 'static,
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     pub fn new(
@@ -56,7 +56,7 @@ where
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
         listening_port: u16,
-        piece_writer: Arc<W>,
+        store: Arc<W>,
     ) -> Self {
         Self {
             peer_slection_strategy,
@@ -65,7 +65,7 @@ where
             stats,
             download_completed: false,
             listening_port,
-            piece_writer,
+            store,
         }
     }
 
@@ -145,7 +145,7 @@ where
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
-                    let piece_writer = self.piece_writer.clone();
+                    let store = self.store.clone();
 
                     // Counted here, not in the connection task, because the
                     // join arm decrements for every id it finds in `dialled`
@@ -161,7 +161,7 @@ where
                             &info_hash,
                             &peer_id,
                             stats,
-                            piece_writer,
+                            store,
                         )
                         .await.start()
                     );
@@ -192,7 +192,7 @@ where
                     let piece_manager_channel_sender = piece_manager_channel_sender.clone();
                     let info_hash = self.info_hash;
                     let peer_id = self.peer_id;
-                    let piece_writer = self.piece_writer.clone();
+                    let store = self.store.clone();
 
                     // One task for the whole connection, not one to dial and
                     // another to run it: only then does the task ending mean
@@ -204,7 +204,7 @@ where
                             &info_hash,
                             &peer_id,
                             stats,
-                            piece_writer,
+                            store,
                         )
                         .await
                         {

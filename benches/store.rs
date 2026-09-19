@@ -1,6 +1,6 @@
 //! Disk path benchmarks.
 //!
-//! These measure the real `DiskPieceWriter`, not a model of it — a hand-rolled
+//! These measure the real `DiskStore`, not a model of it — a hand-rolled
 //! approximation of this path once reported a figure 100x off and sent a whole
 //! afternoon after the wrong bottleneck.
 //!
@@ -17,7 +17,7 @@ use sha1::Digest;
 use tokio::runtime::Runtime;
 
 use dhaar_torrent::{
-    piece_writer::{DiskPieceWriter, PieceWriter},
+    store::{DiskStore, Store},
     wire_protocol::Bitfield,
 };
 
@@ -36,10 +36,10 @@ fn runtime() -> &'static Runtime {
 /// the cost of laying out the file is not charged to whichever bench runs
 /// first. The mutex is uncontended — divan runs a bench on one thread unless
 /// told otherwise — so it costs tens of nanoseconds against tens of micros.
-fn writer() -> &'static Mutex<DiskPieceWriter> {
-    static WRITER: OnceLock<Mutex<DiskPieceWriter>> = OnceLock::new();
+fn writer() -> &'static Mutex<DiskStore> {
+    static WRITER: OnceLock<Mutex<DiskStore>> = OnceLock::new();
     WRITER.get_or_init(|| {
-        let w = DiskPieceWriter::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
+        let w = DiskStore::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
         // The store is always fresh — `main` runs from a directory named after
         // this process — so `initialize` lays it out and never reaches the
         // repair loop these hashes feed. They still have to number `PIECES`:
@@ -59,7 +59,7 @@ fn next_piece() -> u32 {
 }
 
 fn main() {
-    // `DiskPieceWriter` names its store relative to the current directory, so
+    // `DiskStore` names its store relative to the current directory, so
     // the benchmark moves itself somewhere disposable rather than writing a
     // 64 MiB file into the repository.
     let dir = std::env::temp_dir().join(format!("dhaar-bench-{}", std::process::id()));
@@ -165,7 +165,7 @@ mod handoff {
             });
     }
 
-    /// The same syscall reached the way `DiskPieceWriter::write` reaches it.
+    /// The same syscall reached the way `DiskStore::write` reaches it.
     #[divan::bench]
     fn write_block_spawn_blocking(bencher: divan::Bencher) {
         bencher

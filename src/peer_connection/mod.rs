@@ -21,7 +21,7 @@ pub mod request_manager;
 
 pub struct PeerConnection<W>
 where
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     pub stats: Arc<DownloadStats>,
@@ -33,12 +33,12 @@ where
     pub peer_id: [u8; 20],
     /// The store, passed through to the request manager. This type only
     /// carries it; the connection itself never touches the disk.
-    pub piece_writer: Arc<W>,
+    pub store: Arc<W>,
 }
 
 impl<W> PeerConnection<W>
 where
-    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W: crate::store::Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     /// Connects to `peer`. On failure the peer is handed back so the caller
@@ -50,7 +50,7 @@ where
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
-        piece_writer: Arc<W>,
+        store: Arc<W>,
     ) -> PeerConnectionResult<Self> {
         let stream = TcpStream::connect(peer.address).await.map_err(|source| {
             PeerConnectionError::ConnectFailed {
@@ -67,7 +67,7 @@ where
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
-            piece_writer,
+            store,
         })
     }
 
@@ -78,7 +78,7 @@ where
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
-        piece_writer: Arc<W>,
+        store: Arc<W>,
     ) -> Self {
         PeerConnection {
             stats,
@@ -91,7 +91,7 @@ where
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
-            piece_writer,
+            store,
         }
     }
     /// Drives the connection to completion. `run` never closes the connection
@@ -188,7 +188,7 @@ where
             outgoing_sender,
             snapshot.events,
             self.stats.clone(),
-            self.piece_writer.clone(),
+            self.store.clone(),
         );
 
         joinset.spawn(async move {

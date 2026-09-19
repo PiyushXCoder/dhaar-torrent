@@ -6,7 +6,7 @@ use tokio::{fs::File, io::AsyncReadExt, task::spawn_blocking};
 use crate::{torrent_parser::metadata::File as TorrentFile, wire_protocol::Bitfield};
 
 #[async_trait::async_trait]
-pub trait PieceWriter {
+pub trait Store {
     type Error;
 
     /// `piece_hashes` is the torrent's full hash list, used only to re-verify
@@ -138,7 +138,7 @@ impl StoreFlags {
 /// split into the torrent's real shape only by `finalize`. `flags` is a single
 /// byte whose clean bit is set only on a tidy exit, so a store found without
 /// it was left by a crash and its bitfield cannot be trusted.
-pub struct DiskPieceWriter {
+pub struct DiskStore {
     pub temp_file: PathBuf,
     /// Opened once by `initialize` and held for the life of the download.
     /// Every access is positional (`pread`/`pwrite`), so there is no shared
@@ -165,7 +165,7 @@ pub struct DiskPieceWriter {
     pub info_hash: [u8; 20],
 }
 
-impl DiskPieceWriter {
+impl DiskStore {
     pub fn new(
         payload_length: u64,
         piece_length: u64,
@@ -202,14 +202,14 @@ impl DiskPieceWriter {
     fn handle(&self) -> std::io::Result<Arc<std::fs::File>> {
         self.file
             .lock()
-            .expect("piece writer handle poisoned")
+            .expect("store handle poisoned")
             .clone()
-            .ok_or_else(|| std::io::Error::other("piece writer used before initialize"))
+            .ok_or_else(|| std::io::Error::other("store used before initialize"))
     }
 }
 
 #[async_trait::async_trait]
-impl PieceWriter for DiskPieceWriter {
+impl Store for DiskStore {
     type Error = std::io::Error;
 
     async fn initialize(
@@ -303,7 +303,7 @@ impl PieceWriter for DiskPieceWriter {
         .await
         .map_err(std::io::Error::other)??;
 
-        *self.file.lock().expect("piece writer handle poisoned") = Some(Arc::new(file));
+        *self.file.lock().expect("store handle poisoned") = Some(Arc::new(file));
         Ok(bitfield)
     }
 
@@ -440,10 +440,10 @@ impl PieceWriter for DiskPieceWriter {
 mod tests {
     use super::*;
 
-    /// A store laid out in a directory of its own, since `DiskPieceWriter`
+    /// A store laid out in a directory of its own, since `DiskStore`
     /// names its file relative to the working directory.
-    async fn writer(dir: &std::path::Path, pieces: u64, piece_length: u64) -> DiskPieceWriter {
-        let w = DiskPieceWriter::new(
+    async fn writer(dir: &std::path::Path, pieces: u64, piece_length: u64) -> DiskStore {
+        let w = DiskStore::new(
             pieces * piece_length,
             piece_length,
             &dir.join("store").to_string_lossy().into_owned(),

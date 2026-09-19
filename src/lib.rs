@@ -5,8 +5,8 @@ pub mod peer_connection;
 pub mod peer_explorer;
 pub mod peer_manager;
 pub mod piece_manager;
-pub mod piece_writer;
 pub mod status;
+pub mod store;
 pub mod torrent_parser;
 pub mod wire_protocol;
 
@@ -25,8 +25,8 @@ use crate::{
         peer_selection_strategy::{PeerSelectionStrategy, RetryAfterDelayPeerSelectionStrategy},
     },
     piece_manager::{PieceManager, channel::new_piece_manager_channel},
-    piece_writer::{DiskPieceWriter, PieceWriter},
     status::{DownloadState, DownloadStats, DownloadStatus, PieceProgress},
+    store::{DiskStore, Store},
     torrent_parser::{TorrentParser, metadata::Torrent, parser::TorrentFileParser},
 };
 
@@ -47,14 +47,14 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// once. [`Download::from_torrent_file`] fills all three in with the defaults.
 pub struct Download<W, S>
 where
-    W: PieceWriter + Send + Sync + 'static,
+    W: Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
     S: PeerSelectionStrategy + Send + Sync + 'static,
 {
     torrent: Torrent,
     peer_id: [u8; 20],
     listening_port: u16,
-    piece_writer: W,
+    store: W,
     peer_selection_strategy: S,
     peer_sources: Vec<Box<dyn PeerSource + Send>>,
     stats: Arc<DownloadStats>,
@@ -62,7 +62,7 @@ where
     status_sender: watch::Sender<DownloadStatus>,
 }
 
-impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
+impl Download<DiskStore, RetryAfterDelayPeerSelectionStrategy> {
     /// Reads a `.torrent` file and takes the usual defaults: written to disk
     /// beside the current directory, peers from the trackers the file names,
     /// failed peers retried after a delay.
@@ -92,7 +92,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
             stats.clone(),
             listening_port,
         );
-        let piece_writer = DiskPieceWriter::new(
+        let store = DiskStore::new(
             torrent.info.total_length(),
             torrent.info.piece_length,
             &torrent.info.name,
@@ -104,7 +104,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
         Self::new(
             torrent,
             peer_id,
-            piece_writer,
+            store,
             RetryAfterDelayPeerSelectionStrategy::new(),
             vec![Box::new(tracker_manager)],
             stats,
@@ -115,7 +115,7 @@ impl Download<DiskPieceWriter, RetryAfterDelayPeerSelectionStrategy> {
 
 impl<W, S> Download<W, S>
 where
-    W: PieceWriter + Send + Sync + 'static,
+    W: Store + Send + Sync + 'static,
     W::Error: std::error::Error + Send + Sync + 'static,
     S: PeerSelectionStrategy + Send + Sync + 'static,
 {
@@ -128,7 +128,7 @@ where
     pub fn new(
         torrent: Torrent,
         peer_id: [u8; 20],
-        piece_writer: W,
+        store: W,
         peer_selection_strategy: S,
         peer_sources: Vec<Box<dyn PeerSource + Send>>,
         stats: Arc<DownloadStats>,
@@ -138,7 +138,7 @@ where
             torrent,
             peer_id,
             listening_port,
-            piece_writer,
+            store,
             peer_selection_strategy,
             peer_sources,
             stats,
@@ -179,12 +179,12 @@ where
         let peer_explorer = PeerExplorer::new(self.peer_sources);
         // One store, shared. The piece manager lays it out and owns the
         // bitfield; every connection writes the pieces it finishes.
-        let piece_writer = Arc::new(self.piece_writer);
+        let store = Arc::new(self.store);
         let piece_manager = PieceManager::new(
             &self.torrent.info.pieces,
             self.torrent.info.piece_length,
             self.torrent.info.total_length(),
-            piece_writer.clone(),
+            store.clone(),
             self.stats.clone(),
             self.progress_sender.clone(),
             self.torrent.info_hash,
@@ -195,7 +195,7 @@ where
             &self.peer_id,
             self.stats.clone(),
             self.listening_port,
-            piece_writer,
+            store,
         );
 
         let status = self.status_sender.subscribe();

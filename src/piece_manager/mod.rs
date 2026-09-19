@@ -19,13 +19,13 @@ pub const BLOCK_SIZE: u64 = 16 * 1024;
 pub struct PieceManager<E, W>
 where
     E: std::error::Error + Send + Sync + 'static,
-    W: crate::piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+    W: crate::store::Store<Error = E> + Send + Sync + 'static,
 {
     pub piece_length: u64,
     pub total_length: u64,
     pub pieces: Vec<Piece>,
-    // TODO: expose data from piece writer
-    pub piece_writer: Arc<W>,
+    // TODO: expose data from store
+    pub store: Arc<W>,
     /// Fan-out of everything that completes. Connections subscribe to it so
     /// they can cancel work another peer already did and announce what we
     /// hold; nothing here waits on a subscriber.
@@ -62,13 +62,13 @@ pub struct Piece {
 impl<E, W> PieceManager<E, W>
 where
     E: std::error::Error + Send + Sync + 'static,
-    W: crate::piece_writer::PieceWriter<Error = E> + Send + Sync + 'static,
+    W: crate::store::Store<Error = E> + Send + Sync + 'static,
 {
     pub fn new(
         piece_hashes: &ByteBuf,
         piece_length: u64,
         total_length: u64,
-        piece_writer: Arc<W>,
+        store: Arc<W>,
         stats: Arc<DownloadStats>,
         progress: watch::Sender<PieceProgress>,
         info_hash: [u8; 20],
@@ -88,7 +88,7 @@ where
             piece_length,
             total_length,
             pieces: piceces,
-            piece_writer,
+            store,
             piece_events: channel::new_piece_event_channel(),
             stats,
             progress,
@@ -105,7 +105,7 @@ where
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
         let bitfield = self
-            .piece_writer
+            .store
             .initialize(self.pieces.iter().map(|p| p.hash).collect())
             .await
             .unwrap();
@@ -342,7 +342,7 @@ where
         self.bitfield.set_piece(piece_index, true);
         self.completed_pieces += 1;
         self.verified_bytes += piece_length;
-        self.piece_writer
+        self.store
             .set_bitfield(self.bitfield.clone())
             .await
             .unwrap(); // TODO: handle errors
@@ -357,7 +357,7 @@ where
             // `Finalizing` begins. Extraction copies the whole store, so
             // subscribers sit in that state for as long as it takes; the
             // republish below is what ends it.
-            self.piece_writer.finalize().await.unwrap();
+            self.store.finalize().await.unwrap();
             self.extracted = true;
             self.publish_progress();
         }
@@ -401,7 +401,7 @@ where
 
     async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
         let piece_size = self.piece_size(piece_index);
-        let Ok(data) = self.piece_writer.read(piece_index, 0, piece_size).await else {
+        let Ok(data) = self.store.read(piece_index, 0, piece_size).await else {
             return Vec::new();
         };
         let offset = (block_index as u64 * BLOCK_SIZE) as usize;
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::piece_writer::PieceWriter for MemoryWriter {
+    impl crate::store::Store for MemoryWriter {
         type Error = std::io::Error;
 
         async fn initialize(

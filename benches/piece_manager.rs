@@ -23,8 +23,8 @@ use dhaar_torrent::{
         PieceManager,
         channel::{PieceManagerMessage, new_piece_manager_channel},
     },
-    piece_writer::PieceWriter,
     status::{DownloadStats, PieceProgress},
+    store::Store,
     wire_protocol::Bitfield,
 };
 
@@ -49,7 +49,7 @@ fn runtime() -> &'static Runtime {
 
 /// Accepts everything and stores nothing. The point is to time the manager's
 /// own loop — the hashing, the block bookkeeping, the bitfield — rather than
-/// the disk, which `benches/piece_writer.rs` already measures.
+/// the disk, which `benches/store.rs` already measures.
 ///
 /// `read` still has to return the real bytes: a piece whose blocks arrive out
 /// of order falls back to hashing what the store holds, and a writer that
@@ -58,7 +58,7 @@ fn runtime() -> &'static Runtime {
 struct NullWriter;
 
 #[async_trait::async_trait]
-impl PieceWriter for NullWriter {
+impl Store for NullWriter {
     type Error = std::io::Error;
 
     async fn initialize(
