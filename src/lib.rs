@@ -181,7 +181,7 @@ where
             &self.torrent.info.pieces,
             self.torrent.info.piece_length,
             self.torrent.info.total_length(),
-            self.piece_writer,
+            Arc::new(self.piece_writer),
             self.stats.clone(),
             self.progress_sender.clone(),
             self.torrent.info_hash,

@@ -26,7 +26,7 @@ where
     pub total_length: u64,
     pub pieces: Vec<Piece>,
     // TODO: expose data from piece writer
-    pub piece_writer: W,
+    pub piece_writer: Arc<W>,
     /// Fan-out of everything that completes. Connections subscribe to it so
     /// they can cancel work another peer already did and announce what we
     /// hold; nothing here waits on a subscriber.
@@ -145,7 +145,7 @@ where
         piece_hashes: &ByteBuf,
         piece_length: u64,
         total_length: u64,
-        piece_writer: W,
+        piece_writer: Arc<W>,
         stats: Arc<DownloadStats>,
         progress: watch::Sender<PieceProgress>,
         info_hash: [u8; 20],
@@ -755,8 +755,8 @@ mod tests {
     /// running hash or by reading the store back.
     #[derive(Default)]
     struct MemoryWriter {
-        blocks: HashMap<(u32, u64), Vec<u8>>,
-        writes: usize,
+        blocks: std::sync::Mutex<HashMap<(u32, u64), Vec<u8>>>,
+        writes: std::sync::atomic::AtomicUsize,
         reads: std::sync::atomic::AtomicUsize,
     }
 
@@ -765,7 +765,7 @@ mod tests {
         type Error = std::io::Error;
 
         async fn initialize(
-            &mut self,
+            &self,
             _piece_hashes: Vec<[u8; 20]>,
         ) -> Result<Option<Bitfield>, Self::Error> {
             Ok(None)
@@ -780,7 +780,7 @@ mod tests {
             self.reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut out = vec![0u8; length as usize];
-            for ((index, offset), data) in &self.blocks {
+            for ((index, offset), data) in self.blocks.lock().unwrap().iter() {
                 if *index != piece_index || *offset < piece_offset {
                     continue;
                 }
@@ -795,21 +795,25 @@ mod tests {
         }
 
         async fn write(
-            &mut self,
+            &self,
             piece_index: u32,
             piece_offset: u64,
             data: Vec<u8>,
         ) -> Result<(), Self::Error> {
-            self.writes += 1;
-            self.blocks.insert((piece_index, piece_offset), data);
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.blocks
+                .lock()
+                .unwrap()
+                .insert((piece_index, piece_offset), data);
             Ok(())
         }
 
-        async fn set_bitfield(&mut self, _bitfield: Bitfield) -> Result<(), Self::Error> {
+        async fn set_bitfield(&self, _bitfield: Bitfield) -> Result<(), Self::Error> {
             Ok(())
         }
 
-        async fn finalize(&mut self) -> Result<(), Self::Error> {
+        async fn finalize(&self) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -829,7 +833,7 @@ mod tests {
             &ByteBuf::from(vec![0u8; 20]),
             piece_length,
             piece_length,
-            MemoryWriter::default(),
+            Arc::new(MemoryWriter::default()),
             Arc::new(DownloadStats::default()),
             watch::Sender::new(PieceProgress::default()),
             [0u8; 20],
@@ -845,7 +849,7 @@ mod tests {
             &ByteBuf::from(hash.to_vec()),
             piece_length,
             piece_length,
-            MemoryWriter::default(),
+            Arc::new(MemoryWriter::default()),
             Arc::new(DownloadStats::default()),
             watch::Sender::new(PieceProgress::default()),
             [0u8; 20],
@@ -934,7 +938,11 @@ mod tests {
             "the losing copy overwrote the winner's bytes"
         );
         assert_eq!(
-            manager.piece_writer.writes, 0,
+            manager
+                .piece_writer
+                .writes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
             "an unfinished piece has no business touching the store"
         );
         assert_eq!(

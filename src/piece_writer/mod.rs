@@ -14,7 +14,7 @@ pub trait PieceWriter {
     /// the torrent's piece count, so a writer that disagrees with it about the
     /// store's shape rejects it rather than reading at the wrong stride.
     async fn initialize(
-        &mut self,
+        &self,
         piece_hashes: Vec<[u8; 20]>,
     ) -> Result<Option<Bitfield>, Self::Error>;
     async fn read(
@@ -24,13 +24,13 @@ pub trait PieceWriter {
         length: u64,
     ) -> Result<Vec<u8>, Self::Error>;
     async fn write(
-        &mut self,
+        &self,
         piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error>;
-    async fn set_bitfield(&mut self, bitfield: Bitfield) -> Result<(), Self::Error>;
-    async fn finalize(&mut self) -> Result<(), Self::Error>;
+    async fn set_bitfield(&self, bitfield: Bitfield) -> Result<(), Self::Error>;
+    async fn finalize(&self) -> Result<(), Self::Error>;
 }
 
 /// Where each region of the store begins, and how big it is.
@@ -142,9 +142,13 @@ pub struct DiskPieceWriter {
     pub temp_file: PathBuf,
     /// Opened once by `initialize` and held for the life of the download.
     /// Every access is positional (`pread`/`pwrite`), so there is no shared
-    /// cursor for reads and writes to fight over — which is what lets `read`
-    /// keep `&self` while using the same handle `write` does.
-    file: Option<Arc<std::fs::File>>,
+    /// cursor for reads and writes to fight over — which is what lets every
+    /// method here take `&self`, and the writer itself be shared.
+    ///
+    /// Behind a mutex only because `initialize` sets it; it is taken for the
+    /// length of a clone and never held across an await, so the contention is
+    /// a few nanoseconds against a syscall.
+    file: std::sync::Mutex<Option<Arc<std::fs::File>>>,
     /// The torrent's own bytes, which is only the first region of the store —
     /// the file on disk is this plus the bitfield, the info hash and the flag
     /// byte. It doubles as the offset the bitfield starts at.
@@ -175,7 +179,7 @@ impl DiskPieceWriter {
             .join(format!("{name}.dhaar"));
         Self {
             temp_file,
-            file: None,
+            file: std::sync::Mutex::new(None),
             payload_length,
             piece_length,
             name: name.clone(),
@@ -196,6 +200,8 @@ impl DiskPieceWriter {
 
     fn handle(&self) -> std::io::Result<Arc<std::fs::File>> {
         self.file
+            .lock()
+            .expect("piece writer handle poisoned")
             .clone()
             .ok_or_else(|| std::io::Error::other("piece writer used before initialize"))
     }
@@ -206,7 +212,7 @@ impl PieceWriter for DiskPieceWriter {
     type Error = std::io::Error;
 
     async fn initialize(
-        &mut self,
+        &self,
         piece_hashes: Vec<[u8; 20]>,
     ) -> Result<Option<Bitfield>, Self::Error> {
         let layout = self.layout();
@@ -296,7 +302,7 @@ impl PieceWriter for DiskPieceWriter {
         .await
         .map_err(std::io::Error::other)??;
 
-        self.file = Some(Arc::new(file));
+        *self.file.lock().expect("piece writer handle poisoned") = Some(Arc::new(file));
         Ok(bitfield)
     }
 
@@ -318,7 +324,7 @@ impl PieceWriter for DiskPieceWriter {
     }
 
     async fn write(
-        &mut self,
+        &self,
         piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
@@ -334,7 +340,7 @@ impl PieceWriter for DiskPieceWriter {
             .map_err(std::io::Error::other)?
     }
 
-    async fn set_bitfield(&mut self, bitfield: Bitfield) -> Result<(), Self::Error> {
+    async fn set_bitfield(&self, bitfield: Bitfield) -> Result<(), Self::Error> {
         let layout = self.layout();
         let expected = layout.bitfield_length() as usize;
         if bitfield.0.len() != expected {
@@ -380,7 +386,7 @@ impl PieceWriter for DiskPieceWriter {
         .map_err(std::io::Error::other)?
     }
 
-    async fn finalize(&mut self) -> Result<(), Self::Error> {
+    async fn finalize(&self) -> Result<(), Self::Error> {
         let base_dir = self
             .temp_file
             .parent()
@@ -436,7 +442,7 @@ mod tests {
     /// A store laid out in a directory of its own, since `DiskPieceWriter`
     /// names its file relative to the working directory.
     async fn writer(dir: &std::path::Path, pieces: u64, piece_length: u64) -> DiskPieceWriter {
-        let mut w = DiskPieceWriter::new(
+        let w = DiskPieceWriter::new(
             pieces * piece_length,
             piece_length,
             &dir.join("store").to_string_lossy().into_owned(),
@@ -462,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn set_bitfield_keeps_bits_a_stale_snapshot_does_not_know_about() {
         let dir = temp_dir("merge");
-        let mut w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+        let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
 
         let mut first = Bitfield(vec![0u8; 2]);
         first.set_piece(0, true);
@@ -488,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn set_bitfield_rejects_the_wrong_length() {
         let dir = temp_dir("length");
-        let mut w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+        let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
 
         let err = w.set_bitfield(Bitfield(vec![0u8; 1])).await.unwrap_err();
         assert!(

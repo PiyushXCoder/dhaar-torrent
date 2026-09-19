@@ -64,7 +64,7 @@ impl PieceWriter for NullWriter {
     type Error = std::io::Error;
 
     async fn initialize(
-        &mut self,
+        &self,
         _piece_hashes: Vec<[u8; 20]>,
     ) -> Result<Option<Bitfield>, Self::Error> {
         Ok(None)
@@ -80,7 +80,7 @@ impl PieceWriter for NullWriter {
     }
 
     async fn write(
-        &mut self,
+        &self,
         _piece_index: u32,
         _piece_offset: u64,
         _data: Vec<u8>,
@@ -88,11 +88,11 @@ impl PieceWriter for NullWriter {
         Ok(())
     }
 
-    async fn set_bitfield(&mut self, _bitfield: Bitfield) -> Result<(), Self::Error> {
+    async fn set_bitfield(&self, _bitfield: Bitfield) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    async fn finalize(&mut self) -> Result<(), Self::Error> {
+    async fn finalize(&self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -124,7 +124,7 @@ fn harness() -> Harness {
         &ByteBuf::from(hashes),
         PIECE,
         TOTAL,
-        NullWriter,
+        Arc::new(NullWriter),
         Arc::new(DownloadStats::default()),
         progress_tx,
         [0u8; 20],

@@ -39,8 +39,7 @@ fn runtime() -> &'static Runtime {
 fn writer() -> &'static Mutex<DiskPieceWriter> {
     static WRITER: OnceLock<Mutex<DiskPieceWriter>> = OnceLock::new();
     WRITER.get_or_init(|| {
-        let mut w =
-            DiskPieceWriter::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
+        let w = DiskPieceWriter::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
         // The store is always fresh — `main` runs from a directory named after
         // this process — so `initialize` lays it out and never reaches the
         // repair loop these hashes feed. They still have to number `PIECES`:
@@ -80,7 +79,7 @@ fn write_block(bencher: divan::Bencher) {
         .counter(BytesCount::new(BLOCK))
         .with_inputs(|| vec![0xABu8; BLOCK as usize])
         .bench_values(|data| {
-            let mut w = writer().lock().unwrap();
+            let w = writer().lock().unwrap();
             runtime().block_on(w.write(next_piece(), 0, data)).unwrap()
         });
 }
@@ -102,7 +101,7 @@ fn set_bitfield(bencher: divan::Bencher) {
     bencher
         .with_inputs(|| Bitfield(vec![0xFF; BITFIELD_LEN]))
         .bench_values(|bits| {
-            let mut w = writer().lock().unwrap();
+            let w = writer().lock().unwrap();
             runtime().block_on(w.set_bitfield(bits)).unwrap()
         });
 }
@@ -112,7 +111,7 @@ fn set_bitfield(bencher: divan::Bencher) {
 #[divan::bench]
 fn write_whole_piece(bencher: divan::Bencher) {
     bencher.counter(BytesCount::new(PIECE)).bench(|| {
-        let mut w = writer().lock().unwrap();
+        let w = writer().lock().unwrap();
         let piece = next_piece();
         runtime().block_on(async {
             for block in 0..(PIECE / BLOCK) {
