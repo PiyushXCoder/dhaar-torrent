@@ -162,15 +162,6 @@ where
                 PieceManagerMessage::PieceFailed { piece_index, peer } => {
                     self.piece_failed(piece_index, peer);
                 }
-                PieceManagerMessage::ReadBlock {
-                    piece_index,
-                    block_index,
-                    response_sender,
-                } => {
-                    response_sender
-                        .send(self.read_block(piece_index, block_index).await)
-                        .unwrap();
-                }
                 PieceManagerMessage::TotalPieces { response_sender } => {
                     response_sender.send(self.total_pieces()).unwrap();
                 }
@@ -397,19 +388,6 @@ where
             self.stats.piece_released();
         }
         debug!("{}: released by {}", piece_index, peer.address);
-    }
-
-    async fn read_block(&self, piece_index: u32, block_index: u32) -> Vec<u8> {
-        let piece_size = self.piece_size(piece_index);
-        let Ok(data) = self.store.read(piece_index, 0, piece_size).await else {
-            return Vec::new();
-        };
-        let offset = (block_index as u64 * BLOCK_SIZE) as usize;
-        if offset >= data.len() {
-            return Vec::new();
-        }
-        let end = (offset + BLOCK_SIZE as usize).min(data.len());
-        data[offset..end].to_vec()
     }
 
     /// Republishes the coherent view. Called only where a piece's standing

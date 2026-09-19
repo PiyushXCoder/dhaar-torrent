@@ -65,11 +65,6 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         peer: Peer,
     },
-    ReadBlock {
-        piece_index: u32,
-        block_index: u32,
-        response_sender: OneShotSender<Vec<u8>>,
-    },
     TotalPieces {
         response_sender: OneShotSender<u32>,
     },

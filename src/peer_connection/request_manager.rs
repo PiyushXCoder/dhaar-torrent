@@ -844,19 +844,21 @@ where
             return Ok(());
         }
         let block_index = (begin as u64 / BLOCK_SIZE) as u32;
-        // Covers the queue behind the piece manager as well as the read
-        // itself, which is the point: from here the two are one wait. Reads
-        // hit the page cache on a small torrent and the device on a large one,
-        // and the gap between those is three orders of magnitude, so the
-        // distribution matters far more than any average of it.
+        // Straight to the store, which this connection holds anyway. It used
+        // to go through the piece manager, and that cost two things: a turn of
+        // the one task every peer shares, and a whole piece read off disk to
+        // answer for one block of it -- sixteen times the bytes at the usual
+        // piece length.
+        //
+        // Reads hit the page cache on a small torrent and the device on a
+        // large one, and the gap between those is three orders of magnitude,
+        // so the distribution matters far more than any average of it.
         let read_started = time::Instant::now();
-        let mut block = self
-            .ask(|response_sender| PieceManagerMessage::ReadBlock {
-                piece_index: index,
-                block_index,
-                response_sender,
-            })
-            .await?;
+        let block = self
+            .store
+            .read(index, begin as u64, length as u64)
+            .await
+            .unwrap_or_default();
         trace!(
             target: SERVE_TARGET,
             peer = %peer_addr(&self.peer),
@@ -874,7 +876,6 @@ where
             );
             return Ok(());
         }
-        block.truncate(length as usize);
         self.stats.add_uploaded(block.len() as u64);
         debug!(
             "{}: serving block {} of piece {} ({} bytes)",
