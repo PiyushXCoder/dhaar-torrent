@@ -294,7 +294,7 @@ itself, so verification runs on as many cores as there are peers.
 - **`store`** — the download's one file, behind a `Store` trait (`DiskStore` is the disk impl). Shared by every connection: access is positional, and pieces occupy disjoint ranges, so two connections writing different pieces never address the same byte
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
 
-Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and
+Workspace crates: [`bencode-dhaar`](crates/bencode-dhaar) (serde codec) and
 [`crates/dhaar-gui`](crates/dhaar-gui) (the reference client).
 
 ### The store
