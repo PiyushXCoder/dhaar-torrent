@@ -79,12 +79,15 @@ where
         info_hash: [u8; 20],
     ) -> Self {
         // Immutable once parsed, so shared rather than kept per piece.
-        let hashes: Arc<[[u8; 20]]> = piece_hashes
-            .chunks(20)
-            .map(|hash| <[u8; 20]>::try_from(hash).unwrap())
-            .collect();
+        // `as_chunks` hands back the fixed-size arrays directly, so there is
+        // nothing to fall back on: a hash list that is not a whole number of
+        // pieces loses its ragged tail here and is refused by the store's
+        // geometry check rather than panicking on the short chunk.
+        let hashes: Arc<[[u8; 20]]> = piece_hashes.as_chunks::<20>().0.iter().copied().collect();
         let piceces: Vec<Piece> = piece_hashes
-            .chunks(20)
+            .as_chunks::<20>()
+            .0
+            .iter()
             .map(|_| Piece {
                 complete: false,
                 requesters: Vec::new(),
@@ -122,34 +125,32 @@ where
             self.total_pieces(),
             self.piece_length
         );
+        // A `send` that fails means the connection that asked has gone away
+        // between asking and being answered, which is ordinary. Nobody is
+        // waiting for the answer, and the manager must not die over it.
         while let Some(msg) = piece_manager_channel_receiver.recv().await {
-            // TODO: error handling
             match msg {
                 PieceManagerMessage::HasPiece {
                     piece_index,
                     response_sender,
                 } => {
-                    response_sender.send(self.has_piece(piece_index)).unwrap();
+                    let _ = response_sender.send(self.has_piece(piece_index));
                 }
                 PieceManagerMessage::GetBitfield { response_sender } => {
-                    response_sender.send(self.bitfield_snapshot()).unwrap();
+                    let _ = response_sender.send(self.bitfield_snapshot());
                 }
                 PieceManagerMessage::IsInteresting {
                     bitfield,
                     response_sender,
                 } => {
-                    response_sender
-                        .send(self.is_interesting(&bitfield))
-                        .unwrap();
+                    let _ = response_sender.send(self.is_interesting(&bitfield));
                 }
                 PieceManagerMessage::ClaimPiece {
                     bitfield,
                     peer,
                     response_sender,
                 } => {
-                    response_sender
-                        .send(self.claim_piece(&bitfield, peer))
-                        .unwrap();
+                    let _ = response_sender.send(self.claim_piece(&bitfield, peer));
                 }
                 PieceManagerMessage::Release { piece_index, peer } => {
                     self.release(piece_index, peer);
@@ -161,10 +162,10 @@ where
                     self.piece_failed(piece_index, peer);
                 }
                 PieceManagerMessage::TotalPieces { response_sender } => {
-                    response_sender.send(self.total_pieces()).unwrap();
+                    let _ = response_sender.send(self.total_pieces());
                 }
                 PieceManagerMessage::IsCompleted { response_sender } => {
-                    response_sender.send(self.is_completed()).unwrap();
+                    let _ = response_sender.send(self.is_completed());
                 }
             }
         }
