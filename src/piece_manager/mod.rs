@@ -18,15 +18,10 @@ pub const BLOCK_SIZE: u64 = 16 * 1024;
 
 /// How many connections may assemble the same piece at once, in endgame.
 ///
-/// Endgame exists so the tail is not held hostage by one slow peer, and a
-/// second fetch is enough for that. Leaving it unbounded is worse than it
-/// sounds now that a connection abandons a piece the moment somebody else
-/// finishes it: the peer frees up, claims another piece that is also nearly
-/// done, is cancelled again, and churns. Measured on 32 peers over 64 pieces,
-/// uncapped sharing threw away 127 MiB of a 512 MiB download.
-///
-/// The cost of the cap is that a peer with nothing left to share sits idle
-/// until a piece completes, which is what `PieceComplete` wakes it for.
+/// A second fetch is enough to stop one slow peer holding up the tail.
+/// Uncapped, 32 peers over 64 pieces threw away 127 MiB of a 512 MiB
+/// download. The cost is that a peer with nothing to share sits idle until a
+/// piece completes.
 const MAX_PIECE_SHARERS: usize = 2;
 
 pub struct PieceManager<E, W>
@@ -42,9 +37,8 @@ where
     hashes: Arc<[[u8; 20]]>,
     // TODO: expose data from store
     pub store: Arc<W>,
-    /// Fan-out of everything that completes. Connections subscribe to it so
-    /// they can cancel work another peer already did and announce what we
-    /// hold; nothing here waits on a subscriber.
+    /// Fan-out of everything that completes. Nothing here waits on a
+    /// subscriber.
     piece_events: channel::PieceEventSender,
     stats: Arc<DownloadStats>,
     /// Republished whenever a piece verifies. Only this loop writes it, so
@@ -53,15 +47,11 @@ where
     /// Set once `finalize` has written the payload out. Only this loop reads
     /// or writes it, so it needs no synchronisation of its own.
     extracted: bool,
-    /// The bitfield, kept in step with `pieces` rather than rebuilt from it.
-    /// Exactly one bit changes when a piece verifies, and every caller that
-    /// wants the bitfield -- the progress watch, the on-disk claim, a peer
-    /// asking what we hold -- runs on that same completion, so rebuilding it
-    /// there walked every piece once per piece.
+    /// Kept in step with `pieces` rather than rebuilt: one bit changes per
+    /// completed piece, and rebuilding walked every piece once per piece.
     bitfield: Bitfield,
-    /// Running totals over `pieces`, maintained for the same reason. They do
-    /// not start at zero on a resume, which is why `start` seeds them once the
-    /// store has said what it already holds.
+    /// Running totals over `pieces`, for the same reason. Not zero on a
+    /// resume, which is why `adopt_stored` seeds them.
     completed_pieces: u32,
     verified_bytes: u64,
     _info_hash: [u8; 20],
@@ -88,9 +78,7 @@ where
         progress: watch::Sender<PieceProgress>,
         info_hash: [u8; 20],
     ) -> Self {
-        // Fixed the moment the torrent is parsed, so they are shared as they
-        // are rather than kept with the mutable per-piece state. Nothing ever
-        // writes one.
+        // Immutable once parsed, so shared rather than kept per piece.
         let hashes: Arc<[[u8; 20]]> = piece_hashes
             .chunks(20)
             .map(|hash| <[u8; 20]>::try_from(hash).unwrap())
@@ -207,18 +195,11 @@ where
         }
     }
 
-    /// Recomputes the cached views from `pieces`. Walking every piece is the
-    /// right thing to do exactly once, when a resume has just decided what the
-    /// store holds; from there they are carried forward a bit at a time.
-    /// Takes on whatever the store was found to hold, and tells the shared
-    /// counters about it.
+    /// Takes on whatever the store was found to hold.
     ///
-    /// Resumed pieces go to `set_resumed`, not through `piece_verified`: this
-    /// session never downloaded them, so counting them as work it did would
-    /// break the comparison between bytes received and bytes verified -- and
-    /// leaving them out of the counters entirely, which is what used to
-    /// happen, made a resumed download report the whole torrent as still
-    /// wanted.
+    /// Resumed pieces go to `set_resumed`, not `piece_verified`: this session
+    /// never downloaded them, and counting them as its work would break the
+    /// received-against-verified comparison.
     fn adopt_stored(&mut self, stored: Option<Bitfield>) {
         if let Some(stored) = stored {
             for (index, piece) in self.pieces.iter_mut().enumerate() {
@@ -255,20 +236,13 @@ where
             .any(|(index, piece)| !piece.complete && bitfield.has_piece(index as u32))
     }
 
-    /// Hands `peer` work to do, registering it in the same turn of the loop
-    /// that chooses it. Anything that reports availability and then registers
-    /// as a second message leaves a gap two peers can both act on.
-    ///
-    /// `piece_index` is what the peer already holds. It is topped up until it
-    /// runs dry, then handed back so somebody else can take it — in this same
-    /// call, because a peer that has moved on must not still be holding it.
-    /// The reply says so explicitly rather than leaving the caller to assume.
     /// Takes a piece for this peer: an unclaimed one first, and only once
     /// nothing is unclaimed anywhere, one somebody else is already working.
     ///
-    /// Returns everything the caller needs to finish the piece alone — its
-    /// length and the hash it must match — because from here the manager
-    /// hears nothing more about it until it is verified or given back.
+    /// Chooses and registers in the same turn — split in two, a second peer
+    /// can claim the same piece in the gap. Returns everything needed to
+    /// finish the piece alone, because the manager hears nothing more about it
+    /// until it is verified or given back.
     fn claim_piece(&mut self, bitfield: &Bitfield, peer: Peer) -> Option<channel::Claim> {
         let piece_index = match self.select_piece(bitfield) {
             Some(index) => index,

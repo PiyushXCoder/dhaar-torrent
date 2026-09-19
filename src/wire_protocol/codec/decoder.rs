@@ -94,8 +94,6 @@ impl Decoder for WireCodec {
                 Ok(Some(WireItem::Handshake(handshake)))
             }
             CodecState::Normal => loop {
-                // Parse length‑prefixed messages (4‑byte length + payload).
-                // This is the same as in the earlier example.
                 if src.len() < 4 {
                     return Ok(None);
                 }

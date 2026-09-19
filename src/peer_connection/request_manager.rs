@@ -20,19 +20,15 @@ use tokio::{
 };
 use tracing::{debug, trace, warn};
 
-/// Target for the request-window series, kept off the module path so one
-/// measurement can be switched on without the rest of the debug output:
+/// Off the module path so this series can be switched on alone:
 /// `RUST_LOG=dhaar_torrent=info,request_window=trace`.
 const WINDOW_TARGET: &str = "request_window";
 /// Target for the serving side, separate from `WINDOW_TARGET` so a seeding run
 /// and a leeching run can be measured without either burying the other.
 const SERVE_TARGET: &str = "serve_latency";
 
-/// A block this connection has asked for and not yet been given.
-///
-/// The timestamp is the whole reason this is not a bare `u32`: the round trip
-/// from asking to being answered is what the request window has to be sized
-/// against, and it is the one quantity nothing else in the client records.
+/// A block asked for and not yet given. The timestamp is the round trip the
+/// request window is sized against, and nothing else in the client records it.
 struct ActiveBlock {
     index: u32,
     requested_at: time::Instant,
@@ -54,14 +50,12 @@ const REQUEST_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 const AVAILABILITY_TICK: time::Duration = time::Duration::from_secs(5);
 const MAX_REQUESTS: u32 = 50;
 
-/// A claimed piece, held for as long as this connection is working it.
+/// A claimed piece, held while this connection works it.
 ///
-/// Releasing is not something a connection can be trusted to do on its way
-/// out: a panic unwinds past every line of teardown, and a task dropped at an
-/// await point never reaches them at all. Either way the piece manager would
-/// go on believing the piece is spoken for, and since only an unheld piece can
-/// be claimed, nobody could ever pick it up again. Tying the release to the
-/// value's lifetime covers the paths that `start` cannot.
+/// A panic unwinds past teardown and a task dropped at an await never reaches
+/// it, and either way the manager would go on believing the piece is spoken
+/// for — permanently, since only an unheld piece can be claimed. Tying the
+/// release to the value's lifetime covers what `start` cannot.
 struct PieceHold {
     piece_index: u32,
     peer: Peer,
@@ -85,8 +79,8 @@ impl PieceHold {
         }
     }
 
-    /// Hands the piece back and disarms the guard. This is the ordinary path:
-    /// it can wait for room in the queue, which `drop` cannot.
+    /// The ordinary path: it can wait for room in the queue, which `drop`
+    /// cannot.
     async fn release(&mut self) {
         if self.released {
             return;
@@ -116,10 +110,9 @@ impl Drop for PieceHold {
         if self.released {
             return;
         }
-        // `drop` cannot await, so this is the one send that has to be
-        // non-blocking. The queue is deep and this message is small, so a
-        // refusal means the manager is gone or badly backed up; nothing
-        // further can be done from here, but the piece must not go quietly.
+        // `drop` cannot await, so this is the one send that must not block. A
+        // refusal means the manager is gone; nothing more can be done here,
+        // but the piece must not go quietly.
         if let Err(e) = self
             .piece_manager_channel_sender
             .try_send(PieceManagerMessage::Release {
@@ -166,15 +159,11 @@ where
     /// When this connection last sent anything at all. Keep-alives are only
     /// worth sending into silence, so this is what the timer measures from.
     last_sent: time::Instant,
-    /// The store, shared with every other connection and with the piece
-    /// manager. Sharing it is safe because every access is positional and
-    /// pieces occupy disjoint ranges: two connections working different pieces
-    /// never address the same byte.
+    /// Shared with every other connection. Safe because access is positional
+    /// and pieces occupy disjoint ranges.
     store: Arc<W>,
-    /// The piece this connection is assembling, and the hash it must match.
-    /// Held here rather than in the piece manager so that buffering, hashing
-    /// and writing all happen on the connection's own task -- which is what
-    /// lets them run on as many cores as there are peers.
+    /// The piece being assembled. Here rather than in the piece manager so
+    /// buffering, hashing and writing run on as many cores as there are peers.
     piece_buffer: Option<PieceBuffer>,
     /// Blocks of the held piece not yet asked for. The manager hands over the
     /// whole piece, so pacing the window across it happens here.

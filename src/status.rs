@@ -4,27 +4,18 @@ use crate::wire_protocol::Bitfield;
 
 /// Counters written wherever the work happens and readable from anywhere.
 ///
-/// These move far too often to be worth a message — bytes arrive in 16 KiB
-/// blocks from up to `MAX_PEERS` connections at once — so they are plain
-/// atomics rather than state behind an actor. `Relaxed` throughout: every one
-/// of them only counts, and nothing reads two of them expecting them to
-/// describe the same instant.
-///
-/// For a view of the pieces that *is* internally consistent, see
-/// [`PieceProgress`], which the piece manager builds in one turn of its loop.
+/// `Relaxed` throughout: each one only counts, and nothing reads two of them
+/// expecting the same instant. For a view that *is* internally consistent, see
+/// [`PieceProgress`].
 #[derive(Debug, Default)]
 pub struct DownloadStats {
     downloaded_bytes: AtomicU64,
     uploaded_bytes: AtomicU64,
     wasted_bytes: AtomicU64,
     verified_bytes: AtomicU64,
-    /// Payload the store already held when this download started.
-    ///
-    /// Kept apart from `verified_bytes` rather than folded into it, because
-    /// that one is what this session fetched and checked, and comparing it
-    /// with `downloaded_bytes` is how waste is measured. Resumed bytes were
-    /// never received, so counting them there would make a resumed download
-    /// look like it verified more than it ever downloaded.
+    /// Payload the store already held at startup. Kept apart from
+    /// `verified_bytes` because that one is what this session fetched, and
+    /// comparing it with `downloaded_bytes` is how waste is measured.
     resumed_bytes: AtomicU64,
     total_bytes: AtomicU64,
     completed_pieces: AtomicU32,
@@ -37,9 +28,8 @@ pub struct DownloadStats {
 }
 
 impl DownloadStats {
-    /// Payload received off the wire, including copies that turn out to be
-    /// worthless. Compare with [`DownloadStats::verified_bytes`] to see what
-    /// the transfer actually cost.
+    /// Payload received off the wire, worthless copies included. Against
+    /// [`DownloadStats::verified_bytes`], this is what the transfer cost.
     pub fn add_downloaded(&self, bytes: u64) {
         self.downloaded_bytes.fetch_add(bytes, Relaxed);
     }
@@ -119,11 +109,8 @@ impl DownloadStats {
         self.total_bytes.load(Relaxed)
     }
 
-    /// Payload still missing — the tracker's `left` parameter.
-    /// Everything we hold: what this session verified, plus what the store
-    /// already had. Resuming at 90% and reporting the whole torrent as still
-    /// wanted is not only wrong on screen -- it is what a tracker is told in
-    /// `left=`.
+    /// Everything we hold: this session's work plus what the store already
+    /// had.
     pub fn held_bytes(&self) -> u64 {
         self.verified_bytes() + self.resumed_bytes.load(Relaxed)
     }
@@ -133,6 +120,7 @@ impl DownloadStats {
         self.completed_pieces() + self.resumed_pieces.load(Relaxed)
     }
 
+    /// Payload still missing — the tracker's `left` parameter.
     pub fn remaining_bytes(&self) -> u64 {
         self.total_bytes().saturating_sub(self.held_bytes())
     }
@@ -165,11 +153,8 @@ impl DownloadStats {
     }
 }
 
-/// What we hold, as one coherent picture.
-///
-/// Built inside the piece manager's loop, so the count, the byte total and
-/// the bitfield are all of the same instant — unlike the counters in
-/// [`DownloadStats`], which are sampled independently.
+/// What we hold, as one coherent picture: built in a single turn of the piece
+/// manager's loop, so every field describes the same instant.
 #[derive(Clone, Debug)]
 pub struct PieceProgress {
     pub completed_pieces: u32,
@@ -197,10 +182,6 @@ impl Default for PieceProgress {
         }
     }
 }
-
-/// One piece's standing, for callers that draw the piece grid.
-///
-/// `Pending` is distinguishable from `InProgress` because a piece is not
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadState {

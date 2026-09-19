@@ -9,10 +9,9 @@ use crate::{torrent_parser::metadata::File as TorrentFile, wire_protocol::Bitfie
 pub trait Store {
     type Error;
 
-    /// `piece_hashes` is the torrent's full hash list, used only to re-verify
-    /// what the stored bitfield claims after an unclean exit. Its length is
-    /// the torrent's piece count, so a writer that disagrees with it about the
-    /// store's shape rejects it rather than reading at the wrong stride.
+    /// `piece_hashes` re-verifies what the stored bitfield claims after an
+    /// unclean exit. Its length is the piece count, so a store that disagrees
+    /// about the geometry is rejected rather than read at the wrong stride.
     async fn initialize(
         &self,
         piece_hashes: Vec<[u8; 20]>,
@@ -31,20 +30,17 @@ pub trait Store {
     ) -> Result<(), Self::Error>;
     /// Records one piece as held, in the store's own bitfield.
     ///
-    /// One bit, not the whole region: connections call this as they finish
-    /// pieces, so it runs once per piece and the region is a byte per eight
-    /// pieces. Rewriting all of it each time would be quadratic in the piece
-    /// count, and the bit is all that changed.
+    /// One bit, not the whole region: this runs once per completed piece, and
+    /// rewriting all of it each time would be quadratic in the piece count.
     async fn record_piece(&self, piece_index: u32) -> Result<(), Self::Error>;
     async fn finalize(&self) -> Result<(), Self::Error>;
 }
 
 /// Where each region of the store begins, and how big it is.
 ///
-/// The file is `[payload][bitfield][info_hash][flags]`; every offset below
-/// follows from that one sentence plus the torrent's geometry. They live here
-/// rather than at each use so that a region cannot end up addressed one way in
-/// `initialize` and another way in `set_bitfield`.
+/// The file is `[payload][bitfield][info_hash][flags]`; every offset follows
+/// from that plus the torrent's geometry. Kept here rather than at each use so
+/// a region cannot be addressed one way in one place and another elsewhere.
 #[derive(Clone, Copy)]
 struct StoreLayout {
     payload_length: u64,
@@ -102,19 +98,18 @@ impl StoreLayout {
 
 /// The store's trailing flag byte.
 ///
-/// One bit is defined so far. The rest are not ours to touch: a store written
-/// by a newer build may set bits this one has never heard of, so every write
-/// goes through a read and preserves what it did not set. Replacing the byte
-/// wholesale would clear those, which is invisible today and silent data loss
-/// the moment a second flag exists.
+/// One bit is defined so far. A newer build may set others, so every write
+/// reads first and preserves what it did not set — replacing the byte
+/// wholesale is invisible today and silent data loss once a second flag
+/// exists.
 #[derive(Clone, Copy, Default)]
 struct StoreFlags(u8);
 
 impl StoreFlags {
-    /// Set by `finalize` on a tidy exit and cleared whenever the store is
-    /// opened for writing. The sense is deliberately this way round: a byte
-    /// that was zeroed, truncated or never written reads as *not* clean, so
-    /// damage costs a re-verification rather than a bitfield taken on trust.
+    /// Set by `finalize` on a tidy exit, cleared whenever the store is opened.
+    /// This sense round, so a byte that was zeroed, truncated or never written
+    /// reads as *not* clean — damage costs a re-verification rather than a
+    /// bitfield taken on trust.
     const CLEAN: u8 = 0b0000_0001;
 
     fn from_byte(byte: u8) -> Self {
@@ -146,9 +141,9 @@ impl StoreFlags {
 /// it was left by a crash and its bitfield cannot be trusted.
 pub struct DiskStore {
     pub temp_file: PathBuf,
-    /// Opened once by `initialize` and held for the life of the download.
-    /// Every access is positional (`pread`/`pwrite`), so there is no shared
-    /// cursor for reads and writes to fight over — which is what lets every
+    /// Opened once by `initialize` and held for the download's life. Access is
+    /// positional (`pread`/`pwrite`), so there is no shared cursor to fight
+    /// over — which is what lets every
     /// method here take `&self`, and the writer itself be shared by the piece
     /// manager and every connection at once.
     ///
