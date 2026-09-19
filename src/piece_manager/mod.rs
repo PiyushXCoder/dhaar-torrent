@@ -338,10 +338,10 @@ where
         self.bitfield.set_piece(piece_index, true);
         self.completed_pieces += 1;
         self.verified_bytes += piece_length;
-        self.store
-            .set_bitfield(self.bitfield.clone())
-            .await
-            .unwrap(); // TODO: handle errors
+        // The claim on disk is the connection's to make: it wrote the bytes,
+        // so it is the only one that knows they landed. `set_bitfield` merges
+        // rather than overwrites, so a connection claiming one bit cannot drop
+        // anybody else's.
         self.stats.piece_verified(piece_length);
         self.publish_progress();
         let _ = self
@@ -484,7 +484,7 @@ mod tests {
             Ok(())
         }
 
-        async fn set_bitfield(&self, _bitfield: Bitfield) -> Result<(), Self::Error> {
+        async fn record_piece(&self, _piece_index: u32) -> Result<(), Self::Error> {
             Ok(())
         }
 

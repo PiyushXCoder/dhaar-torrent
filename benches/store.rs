@@ -16,16 +16,12 @@ use divan::counter::BytesCount;
 use sha1::Digest;
 use tokio::runtime::Runtime;
 
-use dhaar_torrent::{
-    store::{DiskStore, Store},
-    wire_protocol::Bitfield,
-};
+use dhaar_torrent::store::{DiskStore, Store};
 
 const BLOCK: u64 = 16 * 1024;
 const PIECE: u64 = 256 * 1024;
 const PIECES: u64 = 256;
 const TOTAL: u64 = PIECE * PIECES;
-const BITFIELD_LEN: usize = (PIECES as usize).div_ceil(8);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -94,16 +90,15 @@ fn read_block(bencher: divan::Bencher) {
     });
 }
 
-/// The durability barrier, paid once per completed piece: sync the data, write
-/// the claim, sync the claim. This is the expensive call in the whole file.
+/// The claim a completed piece makes on disk: one bit, read-modify-written
+/// under the store's own lock. It used to rewrite the whole bitfield region,
+/// which grew with the torrent; this does not.
 #[divan::bench]
-fn set_bitfield(bencher: divan::Bencher) {
-    bencher
-        .with_inputs(|| Bitfield(vec![0xFF; BITFIELD_LEN]))
-        .bench_values(|bits| {
-            let w = writer().lock().unwrap();
-            runtime().block_on(w.set_bitfield(bits)).unwrap()
-        });
+fn record_piece(bencher: divan::Bencher) {
+    bencher.bench(|| {
+        let w = writer().lock().unwrap();
+        runtime().block_on(w.record_piece(next_piece())).unwrap()
+    });
 }
 
 /// What a completed piece actually costs on disk: sixteen blocks plus one
@@ -119,9 +114,7 @@ fn write_whole_piece(bencher: divan::Bencher) {
                     .await
                     .unwrap();
             }
-            w.set_bitfield(Bitfield(vec![0xFF; BITFIELD_LEN]))
-                .await
-                .unwrap();
+            w.record_piece(piece).await.unwrap();
         })
     });
 }

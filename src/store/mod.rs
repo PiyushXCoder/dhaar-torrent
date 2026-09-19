@@ -29,7 +29,13 @@ pub trait Store {
         piece_offset: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error>;
-    async fn set_bitfield(&self, bitfield: Bitfield) -> Result<(), Self::Error>;
+    /// Records one piece as held, in the store's own bitfield.
+    ///
+    /// One bit, not the whole region: connections call this as they finish
+    /// pieces, so it runs once per piece and the region is a byte per eight
+    /// pieces. Rewriting all of it each time would be quadratic in the piece
+    /// count, and the bit is all that changed.
+    async fn record_piece(&self, piece_index: u32) -> Result<(), Self::Error>;
     async fn finalize(&self) -> Result<(), Self::Error>;
 }
 
@@ -150,6 +156,9 @@ pub struct DiskStore {
     /// length of a clone and never held across an await, so the contention is
     /// a few nanoseconds against a syscall.
     file: std::sync::Mutex<Option<Arc<std::fs::File>>>,
+    /// Serialises the read-modify-write in `record_piece`. Every connection
+    /// claims its own pieces, and eight of them share a byte.
+    claims: Arc<std::sync::Mutex<()>>,
     /// The torrent's own bytes, which is only the first region of the store —
     /// the file on disk is this plus the bitfield, the info hash and the flag
     /// byte. It doubles as the offset the bitfield starts at.
@@ -181,6 +190,7 @@ impl DiskStore {
         Self {
             temp_file,
             file: std::sync::Mutex::new(None),
+            claims: Arc::new(std::sync::Mutex::new(())),
             payload_length,
             piece_length,
             name: name.clone(),
@@ -341,38 +351,27 @@ impl Store for DiskStore {
             .map_err(std::io::Error::other)?
     }
 
-    async fn set_bitfield(&self, bitfield: Bitfield) -> Result<(), Self::Error> {
+    async fn record_piece(&self, piece_index: u32) -> Result<(), Self::Error> {
         let layout = self.layout();
-        let expected = layout.bitfield_length() as usize;
-        if bitfield.0.len() != expected {
+        if piece_index as u64 >= layout.piece_count() {
             return Err(std::io::Error::other(format!(
-                "bitfield is {} bytes, store expects {expected}",
-                bitfield.0.len()
+                "piece {piece_index} is outside a store of {} pieces",
+                layout.piece_count()
             )));
         }
         let file = self.handle()?;
-        let offset = layout.bitfield_at();
+        let offset = layout.bitfield_at() + (piece_index / 8) as u64;
+        let bit = 1u8 << (7 - (piece_index % 8));
+        let claims = self.claims.clone();
         spawn_blocking(move || {
-            // Read-modify-write rather than a blind overwrite. The claim is
-            // only ever made stronger: a piece that is on disk stays claimed.
-            // Writing the caller's snapshot wholesale would let a stale one
-            // clear a bit somebody else had just set, and the bit it cleared
-            // is a verified piece the client would then refetch.
-            //
-            // Cheap enough to do unconditionally -- the bitfield is one byte
-            // per eight pieces, so a 64 GiB torrent at 256 KiB pieces reads
-            // and writes 32 KiB here, once per completed piece.
-            //
-            // The one place that must *clear* bits is `initialize`, repairing
-            // a store whose last exit was unclean. It writes the corrected
-            // bitfield straight to the file rather than coming through here,
-            // and it has to keep doing so -- routed through this merge, a
-            // repair could never drop a claim it had just found to be false.
-            let mut stored = vec![0u8; expected];
-            file.read_exact_at(&mut stored, offset)?;
-            for (byte, incoming) in stored.iter_mut().zip(bitfield.0.iter()) {
-                *byte |= *incoming;
-            }
+            // Read-modify-write of one byte, and eight pieces share a byte, so
+            // two connections finishing neighbours at the same time would lose
+            // one of the two bits. The lock is held for two syscalls on a
+            // single byte and never across an await.
+            let _guard = claims.lock().expect("store claims poisoned");
+            let mut byte = [0u8];
+            file.read_exact_at(&mut byte, offset)?;
+            byte[0] |= bit;
             // Deliberately unsynced. A barrier here would order the payload
             // before the claim, but it costs a device flush per piece -- the
             // dominant term in download throughput. Instead the claim is only
@@ -380,7 +379,7 @@ impl Store for DiskStore {
             // the flag byte says the last exit was unclean, so a claim that
             // outlives its data is corrected on the way back in rather than
             // prevented on the way out.
-            file.write_all_at(&stored, offset)?;
+            file.write_all_at(&byte, offset)?;
             Ok(())
         })
         .await
@@ -463,43 +462,37 @@ mod tests {
         dir
     }
 
-    /// Two owners completing pieces at the same time each write the bitfield
-    /// they can see. Neither snapshot knows about the other's piece, so a
-    /// blind write would drop whichever landed first.
+    /// Eight pieces share a byte, so two connections finishing neighbours
+    /// must not lose each other's bit.
     #[tokio::test]
-    async fn set_bitfield_keeps_bits_a_stale_snapshot_does_not_know_about() {
+    async fn record_piece_keeps_the_bits_its_neighbours_set() {
         let dir = temp_dir("merge");
         let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
 
-        let mut first = Bitfield(vec![0u8; 2]);
-        first.set_piece(0, true);
-        w.set_bitfield(first).await.unwrap();
+        // 0 and 6 live in the first byte, 9 in the second.
+        w.record_piece(0).await.unwrap();
+        w.record_piece(6).await.unwrap();
+        w.record_piece(9).await.unwrap();
 
-        // Built before piece 0 landed, so it claims only piece 9.
-        let mut stale = Bitfield(vec![0u8; 2]);
-        stale.set_piece(9, true);
-        w.set_bitfield(stale).await.unwrap();
-
-        // Read the region straight out of the store. Going back through
-        // `initialize` would re-verify the pieces and clear both claims, since
-        // this store's payload is zeros and its hashes are not.
         let stored = Bitfield(read_bitfield(&dir, 16 * BLOCK_FOR_TEST, 2));
-        assert!(stored.has_piece(0), "an earlier claim was overwritten");
-        assert!(stored.has_piece(9), "the later claim was not recorded");
+        assert!(stored.has_piece(0), "an earlier claim in the byte was lost");
+        assert!(stored.has_piece(6), "an earlier claim in the byte was lost");
+        assert!(stored.has_piece(9));
+        assert!(!stored.has_piece(1), "a bit nobody claimed was set");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The store checks the caller against its own geometry rather than
-    /// writing a short bitfield over whatever follows it.
+    /// writing over whatever follows the bitfield.
     #[tokio::test]
-    async fn set_bitfield_rejects_the_wrong_length() {
+    async fn record_piece_rejects_an_index_past_the_end() {
         let dir = temp_dir("length");
         let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
 
-        let err = w.set_bitfield(Bitfield(vec![0u8; 1])).await.unwrap_err();
+        let err = w.record_piece(16).await.unwrap_err();
         assert!(
-            err.to_string().contains("store expects"),
+            err.to_string().contains("outside a store"),
             "unexpected error: {err}"
         );
 

@@ -796,6 +796,19 @@ where
             return Ok(());
         }
 
+        // The claim on disk, before the claim in memory. The bitfield is what
+        // makes a piece servable, so recording it after `PieceVerified` would
+        // advertise a piece the store does not yet admit to holding. A failure
+        // here costs a re-download after an unclean exit and nothing else, so
+        // it is not worth abandoning a piece that verified.
+        if let Err(e) = self.store.record_piece(piece_index).await {
+            warn!(
+                "{}: piece {} written but not claimed on disk: {}",
+                peer_addr(&self.peer),
+                piece_index,
+                e
+            );
+        }
         self.send_to_piece_manager(PieceManagerMessage::PieceVerified { piece_index, peer })
             .await;
         // The manager took the piece back when it recorded the completion, so

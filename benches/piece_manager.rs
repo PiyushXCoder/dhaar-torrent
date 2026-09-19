@@ -86,7 +86,7 @@ impl Store for NullWriter {
         Ok(())
     }
 
-    async fn set_bitfield(&self, _bitfield: Bitfield) -> Result<(), Self::Error> {
+    async fn record_piece(&self, _piece_index: u32) -> Result<(), Self::Error> {
         Ok(())
     }
 
