@@ -13,7 +13,7 @@ pub enum Error {
     #[error("toml ser error: {0}")]
     TomlSer(#[from] toml::ser::Error),
     #[error("bencode error: {0}")]
-    Bencode(#[from] bencode::error::Error),
+    Bencode(#[from] bencode_dhaar::error::Error),
     #[error("address parse error: {0}")]
     AddrParse(#[from] std::net::AddrParseError),
 }

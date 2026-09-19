@@ -1,10 +1,10 @@
-![cover](assets/cover.png)
+![cover](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/cover.png)
 
 # Dhaar Torrent _(धार टॉरेंट)_
 
 A torrent client written in Rust. Unserious. Built for fun.
 
-![the reference GUI client, downloading two torrents](assets/dhaar-gui.png)
+![the reference GUI client, downloading two torrents](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/dhaar-gui.png)
 
 ## Status
 

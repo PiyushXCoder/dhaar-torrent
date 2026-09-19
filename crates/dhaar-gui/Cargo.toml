@@ -2,6 +2,11 @@
 name = "dhaar-gui"
 version = "0.1.0"
 edition = "2024"
+description = "A desktop BitTorrent client built on dhaar-torrent"
+license = "MIT"
+repository = "https://github.com/PiyushXCoder/dhaar-torrent"
+keywords = ["bittorrent", "torrent", "p2p", "gui", "client"]
+categories = ["network-programming", "gui"]
 
 [dependencies]
 dhaar-torrent = { version = "0.3.0", path = "../.." }

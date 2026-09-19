@@ -2,7 +2,7 @@ use sha1::Digest;
 use std::collections::HashSet;
 use std::path::Path;
 
-use bencode::{
+use bencode_dhaar::{
     Raw,
     chrono::{deserialize as chrono_deserialize, serialize as chrono_serialize},
 };
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
 pub(crate) fn info_hash(torrent_file_data: &[u8]) -> [u8; 20] {
-    let parse = bencode::from_bytes::<TorrentFileRawInfo>(torrent_file_data).unwrap();
+    let parse = bencode_dhaar::from_bytes::<TorrentFileRawInfo>(torrent_file_data).unwrap();
     sha1::Sha1::digest(parse.info.bytes).into()
 }
 
@@ -70,14 +70,14 @@ pub struct Torrent {
 
 impl Torrent {
     pub(crate) fn parse_from_bytes(torrent_data: &[u8]) -> crate::error::Result<Torrent> {
-        let mut torrent = bencode::from_bytes::<Torrent>(torrent_data)?;
+        let mut torrent = bencode_dhaar::from_bytes::<Torrent>(torrent_data)?;
         torrent.info_hash = info_hash(torrent_data);
         Ok(torrent)
     }
 
     pub(crate) fn parse_from_file_path(file_path: &Path) -> crate::error::Result<Torrent> {
         let torrent_data = std::fs::read(file_path).unwrap();
-        let mut torrent = bencode::from_bytes::<Torrent>(&torrent_data).unwrap();
+        let mut torrent = bencode_dhaar::from_bytes::<Torrent>(&torrent_data).unwrap();
         torrent.info_hash = info_hash(&torrent_data);
         Ok(torrent)
     }
