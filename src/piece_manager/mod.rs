@@ -1,5 +1,5 @@
 use serde_bytes::ByteBuf;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub mod channel;
 
@@ -367,8 +367,17 @@ where
             // `Finalizing` begins. Extraction copies the whole store, so
             // subscribers sit in that state for as long as it takes; the
             // republish below is what ends it.
-            self.store.finalize().await.unwrap();
-            self.extracted = true;
+            match self.store.finalize().await {
+                Ok(()) => self.extracted = true,
+                // Every piece is verified and in the store; only the copy out
+                // of it failed, which a full disk is the usual reason for.
+                // Nothing downloaded is lost, so the client goes on serving
+                // what it holds rather than being torn down over a copy that
+                // can be made again. `extracted` stays false, so the status
+                // keeps saying `Finalizing` instead of claiming a payload that
+                // is not there.
+                Err(e) => error!("{}: could not write the payload out: {}", piece_index, e),
+            }
             self.publish_progress();
         }
     }
@@ -445,6 +454,9 @@ mod tests {
     #[derive(Default)]
     struct MemoryWriter {
         blocks: std::sync::Mutex<HashMap<(u32, u64), Vec<u8>>>,
+        /// Makes `finalize` fail, which is what a full disk looks like from
+        /// here.
+        finalize_fails: bool,
         writes: std::sync::atomic::AtomicUsize,
         reads: std::sync::atomic::AtomicUsize,
     }
@@ -503,6 +515,9 @@ mod tests {
         }
 
         async fn finalize(&self) -> Result<(), Self::Error> {
+            if self.finalize_fails {
+                return Err(std::io::Error::other("no space left on device"));
+            }
             Ok(())
         }
     }
@@ -590,6 +605,41 @@ mod tests {
 
         assert!(shared.is_some(), "endgame should let the tail be shared");
         assert_eq!(manager.pieces[0].requesters, vec![peer(1), peer(2)]);
+    }
+
+    /// The disk filling while the payload is copied out of the store is the
+    /// likeliest I/O failure a client meets, and it used to panic the task
+    /// that every connection talks to -- taking the whole swarm down over a
+    /// copy that could simply be made again.
+    #[tokio::test]
+    async fn a_failed_extraction_does_not_take_the_download_with_it() {
+        let mut manager = PieceManager::new(
+            &ByteBuf::from(vec![0u8; 20]),
+            BLOCK_SIZE * 2,
+            BLOCK_SIZE * 2,
+            Arc::new(MemoryWriter {
+                finalize_fails: true,
+                ..Default::default()
+            }),
+            Arc::new(DownloadStats::default()),
+            watch::Sender::new(PieceProgress::default()),
+            [0u8; 20],
+        );
+        let holder = peer(1);
+        claim(&mut manager, holder);
+
+        // Would have panicked before, on the `unwrap` inside.
+        manager.piece_verified(0, holder).await;
+
+        assert!(
+            manager.pieces[0].complete,
+            "the piece was verified; only the copy out of the store failed"
+        );
+        assert!(
+            !manager.extracted,
+            "extraction failed, so nothing may claim the payload was written"
+        );
+        assert_eq!(manager.completed_pieces, 1);
     }
 
     /// Endgame shares a piece so one slow peer cannot hold up the tail, but
