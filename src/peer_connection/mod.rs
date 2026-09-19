@@ -19,7 +19,11 @@ pub mod channels;
 pub mod error;
 pub mod request_manager;
 
-pub struct PeerConnection {
+pub struct PeerConnection<W>
+where
+    W: crate::store::Store + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     pub stats: Arc<DownloadStats>,
     pub peer: Peer,
     pub is_outbound: bool,
@@ -27,9 +31,16 @@ pub struct PeerConnection {
     pub stream: Option<TcpStream>,
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
+    /// The store, passed through to the request manager. This type only
+    /// carries it; the connection itself never touches the disk.
+    pub store: Arc<W>,
 }
 
-impl PeerConnection {
+impl<W> PeerConnection<W>
+where
+    W: crate::store::Store + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     /// Connects to `peer`. On failure the peer is handed back so the caller
     /// can requeue it, instead of panicking the whole peer manager loop over
     /// a single dead/unreachable peer.
@@ -39,6 +50,7 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
+        store: Arc<W>,
     ) -> PeerConnectionResult<Self> {
         let stream = TcpStream::connect(peer.address).await.map_err(|source| {
             PeerConnectionError::ConnectFailed {
@@ -55,6 +67,7 @@ impl PeerConnection {
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
+            store,
         })
     }
 
@@ -65,6 +78,7 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         stats: Arc<DownloadStats>,
+        store: Arc<W>,
     ) -> Self {
         PeerConnection {
             stats,
@@ -77,6 +91,7 @@ impl PeerConnection {
             stream: Some(stream),
             info_hash: *info_hash,
             peer_id: *peer_id,
+            store,
         }
     }
     /// Drives the connection to completion. `run` never closes the connection
@@ -93,7 +108,9 @@ impl PeerConnection {
     }
 
     async fn run(&mut self) -> PeerConnectionResult<()> {
-        let mut framed = Framed::new(self.stream.take().unwrap(), WireCodec::new());
+        let stream = self.stream.take().unwrap();
+        stream.set_nodelay(true)?;
+        let mut framed = Framed::new(stream, WireCodec::new());
         self.handshake(&mut framed).await?;
         // The subscription comes back with the bitfield rather than being
         // taken later: anything completing in between would be missing from
@@ -171,6 +188,7 @@ impl PeerConnection {
             outgoing_sender,
             snapshot.events,
             self.stats.clone(),
+            self.store.clone(),
         );
 
         joinset.spawn(async move {

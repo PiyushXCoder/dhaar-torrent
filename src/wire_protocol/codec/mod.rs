@@ -42,6 +42,45 @@ mod tests {
     use tokio_util::bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 
+    /// A peer controls every byte of the handshake, including the protocol
+    /// string, and nothing obliges it to be UTF-8. Rejecting it is the same
+    /// answer as a pstr that decodes but names another protocol; panicking on
+    /// it would let any stranger kill the connection task at will.
+    #[test]
+    fn a_handshake_with_a_non_utf8_pstr_is_rejected_not_fatal() {
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(&[19]);
+        // Lone continuation bytes: never valid UTF-8, whatever precedes them.
+        buffer.extend_from_slice(&[0x80u8; 19]);
+        buffer.extend_from_slice(&[0u8; 8]);
+        buffer.extend_from_slice(&[1u8; 20]);
+        buffer.extend_from_slice(&[2u8; 20]);
+
+        let error = WireCodec::new()
+            .decode(&mut buffer)
+            .expect_err("a pstr that is not UTF-8 should be refused");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The control: a pstr that decodes cleanly but names another protocol is
+    /// refused the same way, which is why both share an error.
+    #[test]
+    fn a_handshake_for_another_protocol_is_rejected() {
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(&[19]);
+        buffer.extend_from_slice(b"NotBitTorrent proto");
+        buffer.extend_from_slice(&[0u8; 8]);
+        buffer.extend_from_slice(&[1u8; 20]);
+        buffer.extend_from_slice(&[2u8; 20]);
+
+        let error = WireCodec::new()
+            .decode(&mut buffer)
+            .expect_err("a foreign protocol should be refused");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
     /// Keep-alive is the one message with no id byte, so it is the one whose
     /// frame can be got wrong without any of the others noticing: a length of
     /// one and an id of zero is a `Choke`, and it would be read as one.

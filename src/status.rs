@@ -4,22 +4,23 @@ use crate::wire_protocol::Bitfield;
 
 /// Counters written wherever the work happens and readable from anywhere.
 ///
-/// These move far too often to be worth a message — bytes arrive in 16 KiB
-/// blocks from up to `MAX_PEERS` connections at once — so they are plain
-/// atomics rather than state behind an actor. `Relaxed` throughout: every one
-/// of them only counts, and nothing reads two of them expecting them to
-/// describe the same instant.
-///
-/// For a view of the pieces that *is* internally consistent, see
-/// [`PieceProgress`], which the piece manager builds in one turn of its loop.
+/// `Relaxed` throughout: each one only counts, and nothing reads two of them
+/// expecting the same instant. For a view that *is* internally consistent, see
+/// [`PieceProgress`].
 #[derive(Debug, Default)]
 pub struct DownloadStats {
     downloaded_bytes: AtomicU64,
     uploaded_bytes: AtomicU64,
     wasted_bytes: AtomicU64,
     verified_bytes: AtomicU64,
+    /// Payload the store already held at startup. Kept apart from
+    /// `verified_bytes` because that one is what this session fetched, and
+    /// comparing it with `downloaded_bytes` is how waste is measured.
+    resumed_bytes: AtomicU64,
     total_bytes: AtomicU64,
     completed_pieces: AtomicU32,
+    /// Pieces the store already held, for the same reason.
+    resumed_pieces: AtomicU32,
     total_pieces: AtomicU32,
     in_flight_pieces: AtomicU32,
     hash_failures: AtomicU32,
@@ -27,9 +28,8 @@ pub struct DownloadStats {
 }
 
 impl DownloadStats {
-    /// Payload received off the wire, including copies that turn out to be
-    /// worthless. Compare with [`DownloadStats::verified_bytes`] to see what
-    /// the transfer actually cost.
+    /// Payload received off the wire, worthless copies included. Against
+    /// [`DownloadStats::verified_bytes`], this is what the transfer cost.
     pub fn add_downloaded(&self, bytes: u64) {
         self.downloaded_bytes.fetch_add(bytes, Relaxed);
     }
@@ -56,6 +56,13 @@ impl DownloadStats {
     pub fn set_totals(&self, pieces: u32, bytes: u64) {
         self.total_pieces.store(pieces, Relaxed);
         self.total_bytes.store(bytes, Relaxed);
+    }
+
+    /// Records what a resumed store was found to hold. Called once, before any
+    /// piece of this session verifies.
+    pub fn set_resumed(&self, pieces: u32, bytes: u64) {
+        self.resumed_pieces.store(pieces, Relaxed);
+        self.resumed_bytes.store(bytes, Relaxed);
     }
 
     /// Called as a piece gains its first holder and loses its last, so this
@@ -102,9 +109,20 @@ impl DownloadStats {
         self.total_bytes.load(Relaxed)
     }
 
+    /// Everything we hold: this session's work plus what the store already
+    /// had.
+    pub fn held_bytes(&self) -> u64 {
+        self.verified_bytes() + self.resumed_bytes.load(Relaxed)
+    }
+
+    /// Pieces we hold, from this session and from the store together.
+    pub fn held_pieces(&self) -> u32 {
+        self.completed_pieces() + self.resumed_pieces.load(Relaxed)
+    }
+
     /// Payload still missing — the tracker's `left` parameter.
     pub fn remaining_bytes(&self) -> u64 {
-        self.total_bytes().saturating_sub(self.verified_bytes())
+        self.total_bytes().saturating_sub(self.held_bytes())
     }
 
     pub fn completed_pieces(&self) -> u32 {
@@ -131,15 +149,12 @@ impl DownloadStats {
     /// known, so an empty torrent never reads as finished at startup.
     pub fn is_complete(&self) -> bool {
         let total = self.total_pieces();
-        total > 0 && self.completed_pieces() >= total
+        total > 0 && self.held_pieces() >= total
     }
 }
 
-/// What we hold, as one coherent picture.
-///
-/// Built inside the piece manager's loop, so the count, the byte total and
-/// the bitfield are all of the same instant — unlike the counters in
-/// [`DownloadStats`], which are sampled independently.
+/// What we hold, as one coherent picture: built in a single turn of the piece
+/// manager's loop, so every field describes the same instant.
 #[derive(Clone, Debug)]
 pub struct PieceProgress {
     pub completed_pieces: u32,
@@ -166,21 +181,6 @@ impl Default for PieceProgress {
             extracted: false,
         }
     }
-}
-
-/// One piece's standing, for callers that draw the piece grid.
-///
-/// `Pending` is distinguishable from `InProgress` because a piece is not
-/// divided into blocks until somebody claims it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PieceState {
-    Pending,
-    InProgress {
-        blocks_done: u32,
-        blocks_total: u32,
-        requesters: u32,
-    },
-    Complete,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -20,19 +20,15 @@ use tokio::{
 };
 use tracing::{debug, trace, warn};
 
-/// Target for the request-window series, kept off the module path so one
-/// measurement can be switched on without the rest of the debug output:
+/// Off the module path so this series can be switched on alone:
 /// `RUST_LOG=dhaar_torrent=info,request_window=trace`.
 const WINDOW_TARGET: &str = "request_window";
 /// Target for the serving side, separate from `WINDOW_TARGET` so a seeding run
 /// and a leeching run can be measured without either burying the other.
 const SERVE_TARGET: &str = "serve_latency";
 
-/// A block this connection has asked for and not yet been given.
-///
-/// The timestamp is the whole reason this is not a bare `u32`: the round trip
-/// from asking to being answered is what the request window has to be sized
-/// against, and it is the one quantity nothing else in the client records.
+/// A block asked for and not yet given. The timestamp is the round trip the
+/// request window is sized against, and nothing else in the client records it.
 struct ActiveBlock {
     index: u32,
     requested_at: time::Instant,
@@ -54,14 +50,12 @@ const REQUEST_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 const AVAILABILITY_TICK: time::Duration = time::Duration::from_secs(5);
 const MAX_REQUESTS: u32 = 50;
 
-/// A claimed piece, held for as long as this connection is working it.
+/// A claimed piece, held while this connection works it.
 ///
-/// Releasing is not something a connection can be trusted to do on its way
-/// out: a panic unwinds past every line of teardown, and a task dropped at an
-/// await point never reaches them at all. Either way the piece manager would
-/// go on believing the piece is spoken for, and since only an unheld piece can
-/// be claimed, nobody could ever pick it up again. Tying the release to the
-/// value's lifetime covers the paths that `start` cannot.
+/// A panic unwinds past teardown and a task dropped at an await never reaches
+/// it, and either way the manager would go on believing the piece is spoken
+/// for — permanently, since only an unheld piece can be claimed. Tying the
+/// release to the value's lifetime covers what `start` cannot.
 struct PieceHold {
     piece_index: u32,
     peer: Peer,
@@ -85,8 +79,8 @@ impl PieceHold {
         }
     }
 
-    /// Hands the piece back and disarms the guard. This is the ordinary path:
-    /// it can wait for room in the queue, which `drop` cannot.
+    /// The ordinary path: it can wait for room in the queue, which `drop`
+    /// cannot.
     async fn release(&mut self) {
         if self.released {
             return;
@@ -116,10 +110,9 @@ impl Drop for PieceHold {
         if self.released {
             return;
         }
-        // `drop` cannot await, so this is the one send that has to be
-        // non-blocking. The queue is deep and this message is small, so a
-        // refusal means the manager is gone or badly backed up; nothing
-        // further can be done from here, but the piece must not go quietly.
+        // `drop` cannot await, so this is the one send that must not block. A
+        // refusal means the manager is gone; nothing more can be done here,
+        // but the piece must not go quietly.
         if let Err(e) = self
             .piece_manager_channel_sender
             .try_send(PieceManagerMessage::Release {
@@ -140,7 +133,11 @@ impl Drop for PieceHold {
     }
 }
 
-pub struct RequestManager {
+pub struct RequestManager<W>
+where
+    W: crate::store::Store + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     pub peer: Option<Peer>,
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
@@ -162,9 +159,93 @@ pub struct RequestManager {
     /// When this connection last sent anything at all. Keep-alives are only
     /// worth sending into silence, so this is what the timer measures from.
     last_sent: time::Instant,
+    /// Shared with every other connection. Safe because access is positional
+    /// and pieces occupy disjoint ranges.
+    store: Arc<W>,
+    /// The piece being assembled. Here rather than in the piece manager so
+    /// buffering, hashing and writing run on as many cores as there are peers.
+    piece_buffer: Option<PieceBuffer>,
+    /// Blocks of the held piece not yet asked for. The manager hands over the
+    /// whole piece, so pacing the window across it happens here.
+    pending_blocks: std::collections::VecDeque<u32>,
 }
 
-impl RequestManager {
+/// A piece being assembled by one connection.
+struct PieceBuffer {
+    piece_index: u32,
+    /// What the torrent says this piece must hash to.
+    hash: [u8; 20],
+    bytes: Vec<u8>,
+    /// Fed in block order; `None` once a block has arrived out of order and
+    /// the running hash can no longer be trusted.
+    hasher: Option<sha1::Sha1>,
+    next_hashed_block: u32,
+    /// Which blocks have landed, so the piece knows when it is whole.
+    have: Vec<bool>,
+}
+
+impl PieceBuffer {
+    fn new(piece_index: u32, hash: [u8; 20], piece_length: u64) -> Self {
+        Self {
+            piece_index,
+            hash,
+            bytes: vec![0u8; piece_length as usize],
+            hasher: Some(<sha1::Sha1 as sha1::Digest>::new()),
+            next_hashed_block: 0,
+            have: vec![false; piece_length.div_ceil(BLOCK_SIZE) as usize],
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.have.iter().all(|had| *had)
+    }
+
+    /// Takes the block in, in every sense: hashes it while it is still its own
+    /// value, then copies it into place. Returns false if the block was
+    /// already held, which is the endgame loser's copy and must not be counted
+    /// or hashed twice.
+    fn accept(&mut self, block_index: u32, data: &[u8]) -> bool {
+        let Some(had) = self.have.get_mut(block_index as usize) else {
+            return false;
+        };
+        if *had {
+            return false;
+        }
+        *had = true;
+        if self.next_hashed_block == block_index {
+            if let Some(hasher) = self.hasher.as_mut() {
+                sha1::Digest::update(hasher, data);
+            }
+            self.next_hashed_block += 1;
+        } else {
+            self.hasher = None;
+        }
+        let offset = (block_index as u64 * BLOCK_SIZE) as usize;
+        if offset < self.bytes.len() {
+            let end = (offset + data.len()).min(self.bytes.len());
+            self.bytes[offset..end].copy_from_slice(&data[..end - offset]);
+        }
+        true
+    }
+
+    /// The piece's hash, from the running digest when it saw every block in
+    /// order, and from the assembled bytes otherwise.
+    fn digest(&mut self) -> [u8; 20] {
+        let blocks_total = self.have.len() as u32;
+        match self.hasher.take() {
+            Some(hasher) if self.next_hashed_block == blocks_total => {
+                sha1::Digest::finalize(hasher).into()
+            }
+            _ => <sha1::Sha1 as sha1::Digest>::digest(&self.bytes).into(),
+        }
+    }
+}
+
+impl<W> RequestManager<W>
+where
+    W: crate::store::Store + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: Option<Peer>,
@@ -176,6 +257,7 @@ impl RequestManager {
         outgoing_channel_sender: OutgoingChannelSender,
         piece_events: PieceEventReceiver,
         stats: Arc<DownloadStats>,
+        store: Arc<W>,
     ) -> Self {
         Self {
             peer,
@@ -195,6 +277,9 @@ impl RequestManager {
             piece_events,
             stats,
             last_sent: time::Instant::now(),
+            store,
+            piece_buffer: None,
+            pending_blocks: std::collections::VecDeque::new(),
         }
     }
 
@@ -380,45 +465,10 @@ impl RequestManager {
         Ok(())
     }
 
-    /// Reacts to work finished elsewhere. Our own deliveries come back
-    /// through here too, but they have already left `active_blocks` by then,
-    /// so they fall through as no-ops.
+    /// Reacts to work finished elsewhere. A piece we were working ourselves
+    /// comes back through here too, and falls through as a no-op.
     async fn handle_piece_event(&mut self, event: PieceEvent) -> PeerConnectionResult<()> {
         match event {
-            PieceEvent::BlockComplete {
-                piece_index,
-                block_index,
-            } => {
-                if self.held_piece() != Some(piece_index) {
-                    return Ok(());
-                }
-                let Some(position) = self
-                    .active_blocks
-                    .iter()
-                    .position(|active| active.index == block_index)
-                else {
-                    return Ok(());
-                };
-                // Endgame had us racing another peer for this block and we
-                // lost. Stop the transfer rather than pay for a copy of data
-                // that is already on disk.
-                self.active_blocks.swap_remove(position);
-                let (begin, length) = self.block_bounds(block_index);
-                self.send_message(Message::Cancel {
-                    index: piece_index,
-                    begin,
-                    length,
-                })
-                .await?;
-                debug!(
-                    "{}: cancelled block {} of piece {}, another peer delivered it",
-                    peer_addr(&self.peer),
-                    block_index,
-                    piece_index
-                );
-                // A slot just came free.
-                self.fill_pipeline().await?;
-            }
             PieceEvent::PieceComplete { piece_index } => {
                 self.send_message(Message::Have(piece_index)).await?;
                 // Finishing a piece can be what makes this peer uninteresting.
@@ -471,60 +521,30 @@ impl RequestManager {
 
     /// Keeps up to `MAX_REQUESTS` blocks in flight, all inside one piece.
     /// Working a single piece at a time means a dead connection strands at
-    /// most one partial piece.
+    /// most one piece.
     ///
-    /// The piece manager both chooses the piece and registers us against its
-    /// blocks in one message: asking what is free and then claiming it would
-    /// let a second peer take the same piece in between.
+    /// The manager is asked once per piece, not once per refill: a claim hands
+    /// over the whole piece, and which of its blocks to ask for next is this
+    /// connection's own business. That is the difference between two messages
+    /// per piece and one per window slot.
     async fn fill_pipeline(&mut self) -> PeerConnectionResult<()> {
         if self.peer_choking || !self.am_interested {
             return Ok(());
         }
-        let Some(capacity) = MAX_REQUESTS.checked_sub(self.active_blocks.len() as u32) else {
-            return Ok(());
-        };
-        if capacity == 0 {
-            return Ok(());
-        }
 
-        let bitfield = self.peer_bitfield.clone();
-        let peer = self.peer.unwrap();
-        let piece_index = self.held_piece();
-        let reply = self
-            .ask(|response_sender| PieceManagerMessage::ClaimBlocks {
-                piece_index,
-                bitfield,
-                peer,
-                max_blocks: capacity,
-                response_sender,
-            })
-            .await?;
-
-        // A spent piece is taken back by the manager in the same turn it picks
-        // the replacement. Mirror what it reports instead of inferring it: if
-        // it ever stops taking pieces back, we keep holding this one and hand
-        // it over at teardown, rather than stranding it forever.
-        if let Some(released) = reply.released {
-            debug!(
-                "{}: piece {} is spent, taken back",
-                peer_addr(&self.peer),
-                released
-            );
-            if self.held_piece() == Some(released) {
-                // Already back with the manager, so there is nothing left for
-                // the guard to hand over.
-                if let Some(hold) = self.active_piece.as_mut() {
-                    hold.disarm();
-                }
-                self.active_piece = None;
-            }
-        }
-
-        let Some(claim) = reply.granted else {
-            return Ok(());
-        };
-
-        if self.held_piece() != Some(claim.piece_index) {
+        if self.active_piece.is_none() {
+            let bitfield = self.peer_bitfield.clone();
+            let peer = self.peer.unwrap();
+            let Some(claim) = self
+                .ask(|response_sender| PieceManagerMessage::ClaimPiece {
+                    bitfield,
+                    peer,
+                    response_sender,
+                })
+                .await?
+            else {
+                return Ok(());
+            };
             debug!(
                 "{}: claimed piece {} ({} bytes)",
                 peer_addr(&self.peer),
@@ -536,13 +556,26 @@ impl RequestManager {
                 peer,
                 self.piece_manager_channel_sender.clone(),
             ));
+            self.active_piece_length = claim.piece_length;
+            self.piece_buffer = Some(PieceBuffer::new(
+                claim.piece_index,
+                claim.hash,
+                claim.piece_length,
+            ));
+            self.pending_blocks = (0..claim.piece_length.div_ceil(BLOCK_SIZE) as u32).collect();
         }
-        self.active_piece_length = claim.piece_length;
 
-        for block_index in claim.blocks.iter().copied() {
+        let Some(piece_index) = self.held_piece() else {
+            return Ok(());
+        };
+        let mut sent = 0;
+        while self.active_blocks.len() < MAX_REQUESTS as usize {
+            let Some(block_index) = self.pending_blocks.pop_front() else {
+                break;
+            };
             let (begin, length) = self.block_bounds(block_index);
             self.send_message(Message::Request {
-                index: claim.piece_index,
+                index: piece_index,
                 begin,
                 length,
             })
@@ -551,25 +584,25 @@ impl RequestManager {
                 index: block_index,
                 requested_at: time::Instant::now(),
             });
+            sent += 1;
         }
-        if !claim.blocks.is_empty() {
+
+        if sent > 0 {
             debug!(
                 "{}: requested {} block(s) of piece {}, {} in flight",
                 peer_addr(&self.peer),
-                claim.blocks.len(),
-                claim.piece_index,
+                sent,
+                piece_index,
                 self.active_blocks.len()
             );
-            // The increment half of the window series. The prose above stays
-            // for anyone reading the log; this is the same fact in the same
-            // shape as the decrement, so reconstructing the depth over time
-            // needs one parser rather than two.
+            // The increment half of the window series, in the same shape as
+            // the decrement so one parser reconstructs the depth over time.
             trace!(
                 target: WINDOW_TARGET,
                 peer = %peer_addr(&self.peer),
                 depth = self.active_blocks.len(),
-                piece = claim.piece_index,
-                granted = claim.blocks.len(),
+                piece = piece_index,
+                granted = sent,
             );
         }
         Ok(())
@@ -590,6 +623,10 @@ impl RequestManager {
             self.active_blocks.len()
         );
         self.active_blocks.clear();
+        // Nothing of this piece was written, so the bytes are only useful to a
+        // connection that goes on to finish it. Hand the memory back.
+        self.piece_buffer = None;
+        self.pending_blocks.clear();
         hold.release().await;
     }
 
@@ -676,18 +713,100 @@ impl RequestManager {
         );
         self.stats.add_downloaded(block.len() as u64);
 
-        let peer = self.peer.unwrap();
-        self.send_to_piece_manager(PieceManagerMessage::ReceiveBlock {
-            piece_index,
-            block_index,
-            block_data: block,
-            peer,
-        })
-        .await;
+        // The block goes no further than this task. Buffering, hashing and --
+        // once the piece is whole -- writing all happen here, so a download
+        // with eight peers verifies eight pieces on eight cores instead of
+        // queueing them all behind one.
+        let accepted = self
+            .piece_buffer
+            .as_mut()
+            .is_some_and(|buffer| buffer.accept(block_index, &block));
+        if !accepted {
+            // Already held. An endgame copy that lost its race, and hashing it
+            // twice would corrupt the digest.
+            self.stats.add_wasted(block.len() as u64);
+            return self.fill_pipeline().await;
+        }
+        drop(block);
+
+        if self
+            .piece_buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.is_complete())
+        {
+            self.complete_piece().await?;
+        }
 
         // The piece stays ours until the manager says it is spent; topping it
         // up is `fill_pipeline`'s job.
         self.fill_pipeline().await
+    }
+
+    /// Verifies the assembled piece and, if it holds up, writes it before
+    /// telling the manager. The order matters: the manager sets the bitfield
+    /// bit on that message, and the bitfield is what makes a piece servable to
+    /// other peers.
+    async fn complete_piece(&mut self) -> PeerConnectionResult<()> {
+        let Some(mut buffer) = self.piece_buffer.take() else {
+            return Ok(());
+        };
+        let peer = self.peer.unwrap();
+        let piece_index = buffer.piece_index;
+        let expected = buffer.hash;
+        let digest = buffer.digest();
+
+        if digest != expected {
+            self.send_to_piece_manager(PieceManagerMessage::PieceFailed { piece_index, peer })
+                .await;
+            if let Some(hold) = self.active_piece.as_mut() {
+                hold.disarm();
+            }
+            self.active_piece = None;
+            self.pending_blocks.clear();
+            return Ok(());
+        }
+
+        if let Err(e) = self.store.write(piece_index, 0, buffer.bytes).await {
+            // Nothing was claimed, so the piece is simply still missing. Give
+            // it back rather than reporting a completion the store cannot
+            // back up.
+            warn!(
+                "{}: piece {} could not be written: {}",
+                peer_addr(&self.peer),
+                piece_index,
+                e
+            );
+            self.send_to_piece_manager(PieceManagerMessage::PieceFailed { piece_index, peer })
+                .await;
+            if let Some(hold) = self.active_piece.as_mut() {
+                hold.disarm();
+            }
+            self.active_piece = None;
+            return Ok(());
+        }
+
+        // The claim on disk, before the claim in memory. The bitfield is what
+        // makes a piece servable, so recording it after `PieceVerified` would
+        // advertise a piece the store does not yet admit to holding. A failure
+        // here costs a re-download after an unclean exit and nothing else, so
+        // it is not worth abandoning a piece that verified.
+        if let Err(e) = self.store.record_piece(piece_index).await {
+            warn!(
+                "{}: piece {} written but not claimed on disk: {}",
+                peer_addr(&self.peer),
+                piece_index,
+                e
+            );
+        }
+        self.send_to_piece_manager(PieceManagerMessage::PieceVerified { piece_index, peer })
+            .await;
+        // The manager took the piece back when it recorded the completion, so
+        // the guard has nothing left to hand over.
+        if let Some(hold) = self.active_piece.as_mut() {
+            hold.disarm();
+        }
+        self.active_piece = None;
+        Ok(())
     }
 
     /// Answers a peer's request out of our own storage.
@@ -727,19 +846,21 @@ impl RequestManager {
             return Ok(());
         }
         let block_index = (begin as u64 / BLOCK_SIZE) as u32;
-        // Covers the queue behind the piece manager as well as the read
-        // itself, which is the point: from here the two are one wait. Reads
-        // hit the page cache on a small torrent and the device on a large one,
-        // and the gap between those is three orders of magnitude, so the
-        // distribution matters far more than any average of it.
+        // Straight to the store, which this connection holds anyway. It used
+        // to go through the piece manager, and that cost two things: a turn of
+        // the one task every peer shares, and a whole piece read off disk to
+        // answer for one block of it -- sixteen times the bytes at the usual
+        // piece length.
+        //
+        // Reads hit the page cache on a small torrent and the device on a
+        // large one, and the gap between those is three orders of magnitude,
+        // so the distribution matters far more than any average of it.
         let read_started = time::Instant::now();
-        let mut block = self
-            .ask(|response_sender| PieceManagerMessage::ReadBlock {
-                piece_index: index,
-                block_index,
-                response_sender,
-            })
-            .await?;
+        let block = self
+            .store
+            .read(index, begin as u64, length as u64)
+            .await
+            .unwrap_or_default();
         trace!(
             target: SERVE_TARGET,
             peer = %peer_addr(&self.peer),
@@ -757,7 +878,6 @@ impl RequestManager {
             );
             return Ok(());
         }
-        block.truncate(length as usize);
         self.stats.add_uploaded(block.len() as u64);
         debug!(
             "{}: serving block {} of piece {} ({} bytes)",

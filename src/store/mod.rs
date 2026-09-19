@@ -6,15 +6,14 @@ use tokio::{fs::File, io::AsyncReadExt, task::spawn_blocking};
 use crate::{torrent_parser::metadata::File as TorrentFile, wire_protocol::Bitfield};
 
 #[async_trait::async_trait]
-pub trait PieceWriter {
+pub trait Store {
     type Error;
 
-    /// `piece_hashes` is the torrent's full hash list, used only to re-verify
-    /// what the stored bitfield claims after an unclean exit. Its length is
-    /// the torrent's piece count, so a writer that disagrees with it about the
-    /// store's shape rejects it rather than reading at the wrong stride.
+    /// `piece_hashes` re-verifies what the stored bitfield claims after an
+    /// unclean exit. Its length is the piece count, so a store that disagrees
+    /// about the geometry is rejected rather than read at the wrong stride.
     async fn initialize(
-        &mut self,
+        &self,
         piece_hashes: Vec<[u8; 20]>,
     ) -> Result<Option<Bitfield>, Self::Error>;
     async fn read(
@@ -24,21 +23,24 @@ pub trait PieceWriter {
         length: u64,
     ) -> Result<Vec<u8>, Self::Error>;
     async fn write(
-        &mut self,
+        &self,
         piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
     ) -> Result<(), Self::Error>;
-    async fn set_bitfield(&mut self, bitfield: Bitfield) -> Result<(), Self::Error>;
-    async fn finalize(&mut self) -> Result<(), Self::Error>;
+    /// Records one piece as held, in the store's own bitfield.
+    ///
+    /// One bit, not the whole region: this runs once per completed piece, and
+    /// rewriting all of it each time would be quadratic in the piece count.
+    async fn record_piece(&self, piece_index: u32) -> Result<(), Self::Error>;
+    async fn finalize(&self) -> Result<(), Self::Error>;
 }
 
 /// Where each region of the store begins, and how big it is.
 ///
-/// The file is `[payload][bitfield][info_hash][flags]`; every offset below
-/// follows from that one sentence plus the torrent's geometry. They live here
-/// rather than at each use so that a region cannot end up addressed one way in
-/// `initialize` and another way in `set_bitfield`.
+/// The file is `[payload][bitfield][info_hash][flags]`; every offset follows
+/// from that plus the torrent's geometry. Kept here rather than at each use so
+/// a region cannot be addressed one way in one place and another elsewhere.
 #[derive(Clone, Copy)]
 struct StoreLayout {
     payload_length: u64,
@@ -96,19 +98,18 @@ impl StoreLayout {
 
 /// The store's trailing flag byte.
 ///
-/// One bit is defined so far. The rest are not ours to touch: a store written
-/// by a newer build may set bits this one has never heard of, so every write
-/// goes through a read and preserves what it did not set. Replacing the byte
-/// wholesale would clear those, which is invisible today and silent data loss
-/// the moment a second flag exists.
+/// One bit is defined so far. A newer build may set others, so every write
+/// reads first and preserves what it did not set — replacing the byte
+/// wholesale is invisible today and silent data loss once a second flag
+/// exists.
 #[derive(Clone, Copy, Default)]
 struct StoreFlags(u8);
 
 impl StoreFlags {
-    /// Set by `finalize` on a tidy exit and cleared whenever the store is
-    /// opened for writing. The sense is deliberately this way round: a byte
-    /// that was zeroed, truncated or never written reads as *not* clean, so
-    /// damage costs a re-verification rather than a bitfield taken on trust.
+    /// Set by `finalize` on a tidy exit, cleared whenever the store is opened.
+    /// This sense round, so a byte that was zeroed, truncated or never written
+    /// reads as *not* clean — damage costs a re-verification rather than a
+    /// bitfield taken on trust.
     const CLEAN: u8 = 0b0000_0001;
 
     fn from_byte(byte: u8) -> Self {
@@ -138,13 +139,21 @@ impl StoreFlags {
 /// split into the torrent's real shape only by `finalize`. `flags` is a single
 /// byte whose clean bit is set only on a tidy exit, so a store found without
 /// it was left by a crash and its bitfield cannot be trusted.
-pub struct DiskPieceWriter {
+pub struct DiskStore {
     pub temp_file: PathBuf,
-    /// Opened once by `initialize` and held for the life of the download.
-    /// Every access is positional (`pread`/`pwrite`), so there is no shared
-    /// cursor for reads and writes to fight over — which is what lets `read`
-    /// keep `&self` while using the same handle `write` does.
-    file: Option<Arc<std::fs::File>>,
+    /// Opened once by `initialize` and held for the download's life. Access is
+    /// positional (`pread`/`pwrite`), so there is no shared cursor to fight
+    /// over — which is what lets every
+    /// method here take `&self`, and the writer itself be shared by the piece
+    /// manager and every connection at once.
+    ///
+    /// Behind a mutex only because `initialize` sets it; it is taken for the
+    /// length of a clone and never held across an await, so the contention is
+    /// a few nanoseconds against a syscall.
+    file: std::sync::Mutex<Option<Arc<std::fs::File>>>,
+    /// Serialises the read-modify-write in `record_piece`. Every connection
+    /// claims its own pieces, and eight of them share a byte.
+    claims: Arc<std::sync::Mutex<()>>,
     /// The torrent's own bytes, which is only the first region of the store —
     /// the file on disk is this plus the bitfield, the info hash and the flag
     /// byte. It doubles as the offset the bitfield starts at.
@@ -160,7 +169,7 @@ pub struct DiskPieceWriter {
     pub info_hash: [u8; 20],
 }
 
-impl DiskPieceWriter {
+impl DiskStore {
     pub fn new(
         payload_length: u64,
         piece_length: u64,
@@ -175,7 +184,8 @@ impl DiskPieceWriter {
             .join(format!("{name}.dhaar"));
         Self {
             temp_file,
-            file: None,
+            file: std::sync::Mutex::new(None),
+            claims: Arc::new(std::sync::Mutex::new(())),
             payload_length,
             piece_length,
             name: name.clone(),
@@ -196,17 +206,19 @@ impl DiskPieceWriter {
 
     fn handle(&self) -> std::io::Result<Arc<std::fs::File>> {
         self.file
+            .lock()
+            .expect("store handle poisoned")
             .clone()
-            .ok_or_else(|| std::io::Error::other("piece writer used before initialize"))
+            .ok_or_else(|| std::io::Error::other("store used before initialize"))
     }
 }
 
 #[async_trait::async_trait]
-impl PieceWriter for DiskPieceWriter {
+impl Store for DiskStore {
     type Error = std::io::Error;
 
     async fn initialize(
-        &mut self,
+        &self,
         piece_hashes: Vec<[u8; 20]>,
     ) -> Result<Option<Bitfield>, Self::Error> {
         let layout = self.layout();
@@ -296,7 +308,7 @@ impl PieceWriter for DiskPieceWriter {
         .await
         .map_err(std::io::Error::other)??;
 
-        self.file = Some(Arc::new(file));
+        *self.file.lock().expect("store handle poisoned") = Some(Arc::new(file));
         Ok(bitfield)
     }
 
@@ -318,7 +330,7 @@ impl PieceWriter for DiskPieceWriter {
     }
 
     async fn write(
-        &mut self,
+        &self,
         piece_index: u32,
         piece_offset: u64,
         data: Vec<u8>,
@@ -334,25 +346,42 @@ impl PieceWriter for DiskPieceWriter {
             .map_err(std::io::Error::other)?
     }
 
-    async fn set_bitfield(&mut self, bitfield: Bitfield) -> Result<(), Self::Error> {
+    async fn record_piece(&self, piece_index: u32) -> Result<(), Self::Error> {
+        let layout = self.layout();
+        if piece_index as u64 >= layout.piece_count() {
+            return Err(std::io::Error::other(format!(
+                "piece {piece_index} is outside a store of {} pieces",
+                layout.piece_count()
+            )));
+        }
         let file = self.handle()?;
-        let offset = self.layout().bitfield_at();
+        let offset = layout.bitfield_at() + (piece_index / 8) as u64;
+        let bit = 1u8 << (7 - (piece_index % 8));
+        let claims = self.claims.clone();
         spawn_blocking(move || {
-            // Deliberately unsynced, like `write`. A barrier here would order
-            // the payload before the claim, but it costs a device flush per
-            // piece — the dominant term in download throughput. Instead the
-            // claim is only a hint: `initialize` re-hashes what the bitfield
-            // claims whenever the flag byte says the last exit was unclean, so
-            // a claim that outlives its data is corrected on the way back in
-            // rather than prevented on the way out.
-            file.write_all_at(&bitfield.0, offset)?;
+            // Read-modify-write of one byte, and eight pieces share a byte, so
+            // two connections finishing neighbours at the same time would lose
+            // one of the two bits. The lock is held for two syscalls on a
+            // single byte and never across an await.
+            let _guard = claims.lock().expect("store claims poisoned");
+            let mut byte = [0u8];
+            file.read_exact_at(&mut byte, offset)?;
+            byte[0] |= bit;
+            // Deliberately unsynced. A barrier here would order the payload
+            // before the claim, but it costs a device flush per piece -- the
+            // dominant term in download throughput. Instead the claim is only
+            // a hint: `initialize` re-hashes what the bitfield claims whenever
+            // the flag byte says the last exit was unclean, so a claim that
+            // outlives its data is corrected on the way back in rather than
+            // prevented on the way out.
+            file.write_all_at(&byte, offset)?;
             Ok(())
         })
         .await
         .map_err(std::io::Error::other)?
     }
 
-    async fn finalize(&mut self) -> Result<(), Self::Error> {
+    async fn finalize(&self) -> Result<(), Self::Error> {
         let base_dir = self
             .temp_file
             .parent()
@@ -399,4 +428,79 @@ impl PieceWriter for DiskPieceWriter {
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store laid out in a directory of its own, since `DiskStore`
+    /// names its file relative to the working directory.
+    async fn writer(dir: &std::path::Path, pieces: u64, piece_length: u64) -> DiskStore {
+        let w = DiskStore::new(
+            pieces * piece_length,
+            piece_length,
+            &dir.join("store").to_string_lossy().into_owned(),
+            &None,
+            &None,
+            [7u8; 20],
+        );
+        w.initialize(vec![[0u8; 20]; pieces as usize])
+            .await
+            .unwrap();
+        w
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dhaar-pw-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Eight pieces share a byte, so two connections finishing neighbours
+    /// must not lose each other's bit.
+    #[tokio::test]
+    async fn record_piece_keeps_the_bits_its_neighbours_set() {
+        let dir = temp_dir("merge");
+        let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+
+        // 0 and 6 live in the first byte, 9 in the second.
+        w.record_piece(0).await.unwrap();
+        w.record_piece(6).await.unwrap();
+        w.record_piece(9).await.unwrap();
+
+        let stored = Bitfield(read_bitfield(&dir, 16 * BLOCK_FOR_TEST, 2));
+        assert!(stored.has_piece(0), "an earlier claim in the byte was lost");
+        assert!(stored.has_piece(6), "an earlier claim in the byte was lost");
+        assert!(stored.has_piece(9));
+        assert!(!stored.has_piece(1), "a bit nobody claimed was set");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The store checks the caller against its own geometry rather than
+    /// writing over whatever follows the bitfield.
+    #[tokio::test]
+    async fn record_piece_rejects_an_index_past_the_end() {
+        let dir = temp_dir("length");
+        let w = writer(&dir, 16, BLOCK_FOR_TEST).await;
+
+        let err = w.record_piece(16).await.unwrap_err();
+        assert!(
+            err.to_string().contains("outside a store"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn read_bitfield(dir: &std::path::Path, offset: u64, length: usize) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::File::open(dir.join("store.dhaar")).unwrap();
+        let mut bits = vec![0u8; length];
+        file.read_exact_at(&mut bits, offset).unwrap();
+        bits
+    }
+
+    const BLOCK_FOR_TEST: u64 = 16 * 1024;
 }

@@ -57,7 +57,11 @@ divan = "0.1.21"
 husky-rs = "0.3.3"
 
 [[bench]]
-name = "piece_writer"
+name = "store"
+harness = false
+
+[[bench]]
+name = "piece_manager"
 harness = false
 
 # Optimised like `release`, but keeps the symbols a profiler needs to name a

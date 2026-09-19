@@ -11,7 +11,6 @@ pub fn generate_random_peer_id() -> [u8; 20] {
     let prefix = format!("-DH{}-", version);
     peer_id[..prefix.len()].copy_from_slice(prefix.as_bytes());
 
-    // Fill remaining 15 bytes with random bytes
     rng().fill(&mut peer_id[prefix.len()..]);
 
     peer_id

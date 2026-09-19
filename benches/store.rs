@@ -1,6 +1,6 @@
 //! Disk path benchmarks.
 //!
-//! These measure the real `DiskPieceWriter`, not a model of it — a hand-rolled
+//! These measure the real `DiskStore`, not a model of it — a hand-rolled
 //! approximation of this path once reported a figure 100x off and sent a whole
 //! afternoon after the wrong bottleneck.
 //!
@@ -16,16 +16,12 @@ use divan::counter::BytesCount;
 use sha1::Digest;
 use tokio::runtime::Runtime;
 
-use dhaar_torrent::{
-    piece_manager::piece_writer::{DiskPieceWriter, PieceWriter},
-    wire_protocol::Bitfield,
-};
+use dhaar_torrent::store::{DiskStore, Store};
 
 const BLOCK: u64 = 16 * 1024;
 const PIECE: u64 = 256 * 1024;
 const PIECES: u64 = 256;
 const TOTAL: u64 = PIECE * PIECES;
-const BITFIELD_LEN: usize = (PIECES as usize).div_ceil(8);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -36,11 +32,10 @@ fn runtime() -> &'static Runtime {
 /// the cost of laying out the file is not charged to whichever bench runs
 /// first. The mutex is uncontended — divan runs a bench on one thread unless
 /// told otherwise — so it costs tens of nanoseconds against tens of micros.
-fn writer() -> &'static Mutex<DiskPieceWriter> {
-    static WRITER: OnceLock<Mutex<DiskPieceWriter>> = OnceLock::new();
+fn writer() -> &'static Mutex<DiskStore> {
+    static WRITER: OnceLock<Mutex<DiskStore>> = OnceLock::new();
     WRITER.get_or_init(|| {
-        let mut w =
-            DiskPieceWriter::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
+        let w = DiskStore::new(TOTAL, PIECE, &"bench".to_string(), &None, &None, [7u8; 20]);
         // The store is always fresh — `main` runs from a directory named after
         // this process — so `initialize` lays it out and never reaches the
         // repair loop these hashes feed. They still have to number `PIECES`:
@@ -60,7 +55,7 @@ fn next_piece() -> u32 {
 }
 
 fn main() {
-    // `DiskPieceWriter` names its store relative to the current directory, so
+    // `DiskStore` names its store relative to the current directory, so
     // the benchmark moves itself somewhere disposable rather than writing a
     // 64 MiB file into the repository.
     let dir = std::env::temp_dir().join(format!("dhaar-bench-{}", std::process::id()));
@@ -80,7 +75,7 @@ fn write_block(bencher: divan::Bencher) {
         .counter(BytesCount::new(BLOCK))
         .with_inputs(|| vec![0xABu8; BLOCK as usize])
         .bench_values(|data| {
-            let mut w = writer().lock().unwrap();
+            let w = writer().lock().unwrap();
             runtime().block_on(w.write(next_piece(), 0, data)).unwrap()
         });
 }
@@ -95,16 +90,15 @@ fn read_block(bencher: divan::Bencher) {
     });
 }
 
-/// The durability barrier, paid once per completed piece: sync the data, write
-/// the claim, sync the claim. This is the expensive call in the whole file.
+/// The claim a completed piece makes on disk: one bit, read-modify-written
+/// under the store's own lock. It used to rewrite the whole bitfield region,
+/// which grew with the torrent; this does not.
 #[divan::bench]
-fn set_bitfield(bencher: divan::Bencher) {
-    bencher
-        .with_inputs(|| Bitfield(vec![0xFF; BITFIELD_LEN]))
-        .bench_values(|bits| {
-            let mut w = writer().lock().unwrap();
-            runtime().block_on(w.set_bitfield(bits)).unwrap()
-        });
+fn record_piece(bencher: divan::Bencher) {
+    bencher.bench(|| {
+        let w = writer().lock().unwrap();
+        runtime().block_on(w.record_piece(next_piece())).unwrap()
+    });
 }
 
 /// What a completed piece actually costs on disk: sixteen blocks plus one
@@ -112,7 +106,7 @@ fn set_bitfield(bencher: divan::Bencher) {
 #[divan::bench]
 fn write_whole_piece(bencher: divan::Bencher) {
     bencher.counter(BytesCount::new(PIECE)).bench(|| {
-        let mut w = writer().lock().unwrap();
+        let w = writer().lock().unwrap();
         let piece = next_piece();
         runtime().block_on(async {
             for block in 0..(PIECE / BLOCK) {
@@ -120,11 +114,86 @@ fn write_whole_piece(bencher: divan::Bencher) {
                     .await
                     .unwrap();
             }
-            w.set_bitfield(Bitfield(vec![0xFF; BITFIELD_LEN]))
-                .await
-                .unwrap();
+            w.record_piece(piece).await.unwrap();
         })
     });
+}
+
+/// What the `spawn_blocking` around each write actually costs, as opposed to
+/// the write itself. `write` hands every block to the blocking pool, which is
+/// the documented thing to do with blocking I/O -- but a 16 KiB `pwrite` that
+/// lands in page cache is a short, bounded syscall, and the handoff may well
+/// cost more than the work. The gap between these two is the answer, and it is
+/// what decides whether batching, a writer task, or dropping the handoff is
+/// the right fix.
+mod handoff {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    fn file() -> &'static std::sync::Arc<std::fs::File> {
+        static F: OnceLock<std::sync::Arc<std::fs::File>> = OnceLock::new();
+        F.get_or_init(|| {
+            let path = std::env::current_dir().unwrap().join("handoff.bin");
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            f.set_len(TOTAL).unwrap();
+            std::sync::Arc::new(f)
+        })
+    }
+
+    /// The syscall on its own, no pool in the way.
+    #[divan::bench]
+    fn write_block_direct(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(BLOCK))
+            .with_inputs(|| vec![0xABu8; BLOCK as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                file().write_all_at(&data, offset).unwrap()
+            });
+    }
+
+    /// The same syscall reached the way `DiskStore::write` reaches it.
+    #[divan::bench]
+    fn write_block_spawn_blocking(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(BLOCK))
+            .with_inputs(|| vec![0xABu8; BLOCK as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                let f = file().clone();
+                runtime()
+                    .block_on(async move {
+                        tokio::task::spawn_blocking(move || f.write_all_at(&data, offset)).await
+                    })
+                    .unwrap()
+                    .unwrap()
+            });
+    }
+
+    /// A whole piece in one syscall instead of sixteen. If the handoff is the
+    /// cost, this is what batching would buy.
+    #[divan::bench]
+    fn write_whole_piece_one_call(bencher: divan::Bencher) {
+        bencher
+            .counter(BytesCount::new(PIECE))
+            .with_inputs(|| vec![0xABu8; PIECE as usize])
+            .bench_values(|data| {
+                let offset = next_piece() as u64 * PIECE;
+                let f = file().clone();
+                runtime()
+                    .block_on(async move {
+                        tokio::task::spawn_blocking(move || f.write_all_at(&data, offset)).await
+                    })
+                    .unwrap()
+                    .unwrap()
+            });
+    }
 }
 
 /// Verification, which runs inline in the piece manager's loop. Worth watching

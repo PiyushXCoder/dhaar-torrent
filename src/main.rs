@@ -57,7 +57,7 @@ async fn main() {
         while status.changed().await.is_ok() {
             let status = status.borrow_and_update();
             info!(
-                "{:?} {:.1}% | {}/{} pieces | {} peers | down {} KiB/s up {} KiB/s",
+                "{:?} {:.1}% | {}/{} pieces | {} peers | down {} KiB/s up {} KiB/s | wasted {} KiB",
                 status.state,
                 status.progress() * 100.0,
                 status.pieces.completed_pieces,
@@ -65,6 +65,7 @@ async fn main() {
                 status.active_peers,
                 status.download_rate / 1024,
                 status.upload_rate / 1024,
+                status.wasted_bytes / 1024,
             );
         }
     });

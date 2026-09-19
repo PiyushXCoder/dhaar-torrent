@@ -37,7 +37,15 @@ impl Decoder for WireCodec {
                     if src.len() < offset + len as usize {
                         return Ok(None);
                     }
-                    let pstr = std::str::from_utf8(&buf[1..=len as usize]).unwrap();
+                    // A peer controls these bytes, so they need not be UTF-8.
+                    // Same answer as a pstr that decodes but says the wrong
+                    // thing: this is not a BitTorrent peer.
+                    let Ok(pstr) = std::str::from_utf8(&buf[1..=len as usize]) else {
+                        return Err(std::io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid pstr",
+                        ));
+                    };
                     if pstr != "BitTorrent protocol" {
                         return Err(std::io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -94,8 +102,6 @@ impl Decoder for WireCodec {
                 Ok(Some(WireItem::Handshake(handshake)))
             }
             CodecState::Normal => loop {
-                // Parse length‑prefixed messages (4‑byte length + payload).
-                // This is the same as in the earlier example.
                 if src.len() < 4 {
                     return Ok(None);
                 }
