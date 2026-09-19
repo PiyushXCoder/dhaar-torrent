@@ -221,7 +221,7 @@ large to cache.
 
 - **Loopback is not a network.** Every peer here is a local process with
   effectively infinite bandwidth and no latency. The one-piece-at-a-time
-  request window that limits a real peer to `piece_length / RTT` never binds,
+  request window that limits a real peer never binds,
   so these figures are an upper bound the internet will not reproduce.
 - **Name the filesystem.** `cargo bench` follows `TMPDIR`, which on most
   machines is tmpfs — where the disk path stops being a disk path. tmpfs and
@@ -241,15 +241,42 @@ large to cache.
 
 ### Against a real link
 
-Not measured on the current client, and so not quoted. The last figures — 2.5
-MB/s from a live swarm against 9.9 MB/s of available link — predate every change
-above and describe a far slower client.
+The only measurement that says how much of a real connection actually gets
+used. All of these come from one session against the Ubuntu 26.04 desktop ISO
+(6.5 GB, 24,868 pieces) on a domestic link, tracker-only — no DHT, no PEX:
 
-That comparison is the one worth having, because it is the only one that says
-how much of a real connection actually gets used. Redoing it means a live swarm,
-a mirror to measure the link against, and enough runs to average out the ±20% a
-public swarm moves by — all four numbers from one session, or the comparison
-between them means nothing.
+| | rate |
+| --- | ---: |
+| Link capacity (8 parallel HTTP streams) | 10.24 MB/s |
+| Single HTTP stream from the mirror | 3.32 MB/s |
+| **dhaar** | **8.96 MB/s** steady, 10.67 p90, 12.14 peak |
+| Transmission 4.1.3, tracker-only, same window | 7.68 MB/s |
+
+So the client saturates the link. Correctness was checked against the swarm
+both ways: a full 6.5 GB download verified all 24,868 pieces against the
+torrent's own hashes, and a part-finished store from the multi-piece window
+verified all 14,603 it claimed — the check that matters for that change, since
+several pieces are assembled at once and a misfiled block would land in the
+wrong one.
+
+That number was **1.05 MB/s** until a one-line constant changed, and the story
+is worth keeping because the benchmark above is what hid it. A connection used
+to assemble one piece at a time, which capped the window at sixteen blocks —
+256 KiB — however high `MAX_REQUESTS` went, and left it silent for a full round
+trip at every piece boundary while it hashed, wrote and claimed the next piece.
+On loopback, where the round trip is 0.05 ms, neither costs anything: the
+eight-peer arm reads 1370 MB/s with the old window and 1370 MB/s with the new
+one. Against real peers it was the difference between 150 KB/s per peer and
+saturating the line.
+
+Letting a connection hold four pieces costs memory — peak RSS went from 195 to
+313 MiB on the worst case here, thirty-two peers at an 8 MiB piece length,
+because that is four buffers per connection rather than one. It also means a
+dying connection strands four pieces instead of one.
+
+Peer count still moves by a factor of four between runs an hour apart, and the
+tracker is the only peer source, so treat the rate as the shape of one
+afternoon rather than a constant.
 
 ## Architecture
 
@@ -262,7 +289,7 @@ itself, so verification runs on as many cores as there are peers.
 - **`peer_explorer`** — owns peer sources (currently `TrackerManager` over HTTP) and streams discovered peers out
 - **`peer_manager`** — pulls peers through a selection strategy, caps concurrency at 50 connections, stops dialling once every piece is verified, and supervises the connection tasks directly: a task that panics or is dropped reports nothing, so its ending is observed rather than announced
 - **`peer_connection`** — TCP connect, handshake, bitfield exchange, then hands the framed stream to `request_manager`
-- **`request_manager`** — per-peer state machine (choke/interest, pipelined block requests, idle/request timeouts, `Have` announcements) and the data path: it assembles its own piece in memory, hashes it as the blocks land, verifies it and writes it to the store, reporting to `piece_manager` only once the bytes are down
+- **`request_manager`** — per-peer state machine (choke/interest, pipelined block requests, idle/request timeouts, `Have` announcements) and the data path: it assembles up to four pieces at once in memory, hashes each as its blocks land, verifies and writes them, reporting to `piece_manager` only once the bytes are down. Several pieces rather than one so the request window never drains while a piece is being finished
 - **`piece_manager`** — the arbiter of who downloads what, and nothing else: it hands a peer a whole piece and registers the claim in one message, so two peers cannot take the same work in the gap between asking and being answered. It also owns the bitfield, the totals and the completion announcement. Payload never passes through it
 - **`store`** — the download's one file, behind a `Store` trait (`DiskStore` is the disk impl). Shared by every connection: access is positional, and pieces occupy disjoint ranges, so two connections writing different pieces never address the same byte
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
@@ -299,7 +326,7 @@ rest of the time.
 - [x] Piece manager — piece indices, bitfield tracking, atomic cross-peer piece claiming
 - [x] Request manager — per-peer connection state machine, pulled out of `peer_connection`
 - [x] Connection timeouts — handshake/bitfield timeouts, 150s idle timeout, 30s outstanding-request timeout
-- [x] Request pipelining — outstanding block requests capped at one piece's worth per peer
+- [x] Request pipelining — several pieces in flight per peer, so the window survives a piece boundary
 - [x] Per-connection data path — each peer buffers, hashes and writes its own piece, so verification scales with peer count
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
