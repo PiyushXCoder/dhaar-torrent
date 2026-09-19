@@ -1,0 +1,19 @@
+[package]
+name = "bencode-dhaar"
+version = "0.1.0"
+edition = "2024"
+description = "Bencode encoding and decoding for serde, as used by the dhaar-torrent client"
+license = "MIT"
+repository = "https://github.com/PiyushXCoder/dhaar-torrent"
+keywords = ["bencode", "bittorrent", "serde", "serialization", "torrent"]
+categories = ["encoding", "parser-implementations"]
+
+[dependencies]
+chrono = { workspace = true }
+derive_more = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_bytes = "0.11.19"

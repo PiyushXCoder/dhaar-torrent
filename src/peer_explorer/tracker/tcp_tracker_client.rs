@@ -4,7 +4,7 @@ use tracing::info;
 use super::tracker_client::TrackerClient;
 use crate::error::Result;
 use crate::helpers::url_safe_string_hash;
-use bencode;
+use bencode_dhaar;
 
 #[derive(Debug, Clone)]
 pub struct TcpTrackerClient {
@@ -68,10 +68,10 @@ impl TrackerClient for TcpTrackerClient {
         let res = client.get(&url).send().await?;
         let bytes = res.bytes().await?;
 
-        let response = bencode::from_bytes::<TrackerResponse>(&bytes)
+        let response = bencode_dhaar::from_bytes::<TrackerResponse>(&bytes)
             .map_err(crate::error::Error::from)
             .or_else(|_| {
-                let raw = bencode::from_bytes::<TrackerResponseRawPeer>(&bytes)?;
+                let raw = bencode_dhaar::from_bytes::<TrackerResponseRawPeer>(&bytes)?;
                 TrackerResponse::try_from(raw)
             })?;
         Ok(response)

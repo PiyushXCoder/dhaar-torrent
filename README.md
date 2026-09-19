@@ -1,10 +1,14 @@
-![cover](assets/cover.png)
+![cover](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/cover.png)
 
 # Dhaar Torrent _(धार टॉरेंट)_
 
+[![crates.io](https://img.shields.io/crates/v/dhaar-torrent.svg?logo=rust)](https://crates.io/crates/dhaar-torrent)
+[![docs.rs](https://img.shields.io/docsrs/dhaar-torrent?logo=docsdotrs)](https://docs.rs/dhaar-torrent)
+[![YouTube](https://img.shields.io/badge/YouTube-build%20log-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/playlist?list=PLCjPsGYL4lfFoyjCFFrf8qKf20SaW6qfz)
+
 A torrent client written in Rust. Unserious. Built for fun.
 
-![the reference GUI client, downloading two torrents](assets/dhaar-gui.png)
+![the reference GUI client, pulling an Ubuntu ISO at 12.2 MiB/s](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/dhaar-gui.png)
 
 ## Status
 
@@ -294,7 +298,7 @@ itself, so verification runs on as many cores as there are peers.
 - **`store`** — the download's one file, behind a `Store` trait (`DiskStore` is the disk impl). Shared by every connection: access is positional, and pieces occupy disjoint ranges, so two connections writing different pieces never address the same byte
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
 
-Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and
+Workspace crates: [`bencode-dhaar`](crates/bencode-dhaar) (serde codec) and
 [`crates/dhaar-gui`](crates/dhaar-gui) (the reference client).
 
 ### The store

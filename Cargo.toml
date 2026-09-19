@@ -15,13 +15,22 @@ thiserror = "2.0.18"
 
 [package]
 name = "dhaar-torrent"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
+description = "A BitTorrent client library: peer wire protocol, piece management and a resumable on-disk store"
+license = "MIT"
+repository = "https://github.com/PiyushXCoder/dhaar-torrent"
+readme = "README.md"
+keywords = ["bittorrent", "torrent", "p2p", "peer-to-peer", "async"]
+categories = ["network-programming", "asynchronous"]
+# Dev artefacts: 3.6 MB of cover images, sample torrents and scripts that
+# nobody depending on this crate needs to download.
+exclude = ["assets/", "sample_torrent_files/", "scripts/", ".husky/"]
 
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-bencode = { path = "crates/bencode" }
+bencode-dhaar = { version = "0.1.0", path = "crates/bencode-dhaar" }
 chrono = { workspace = true }
 clap = { version = "4.6.1", features = ["derive"] }
 derive_more = { workspace = true }
