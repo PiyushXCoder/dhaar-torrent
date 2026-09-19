@@ -137,72 +137,44 @@ fn harness() -> Harness {
     }
 }
 
-/// Feeds every block of every piece, in order, and waits for the last piece to
-/// verify. Blocks arrive in order essentially always in a real download — 4096
-/// of 4096 pieces on one peer, 4090 on eight — so this is the ordinary path,
-/// the one where the running hash carries the piece and nothing is read back.
-#[divan::bench]
-fn drive_whole_download(bencher: divan::Bencher) {
-    bencher
-        .counter(BytesCount::new(TOTAL))
-        .counter(ItemsCount::new(PIECES * BLOCKS_PER_PIECE))
-        .with_inputs(harness)
-        .bench_values(|mut harness| {
-            runtime().block_on(async move {
-                for piece_index in 0..PIECES as u32 {
-                    for block_index in 0..BLOCKS_PER_PIECE as u32 {
-                        harness
-                            .sender
-                            .send(PieceManagerMessage::ReceiveBlock {
-                                piece_index,
-                                block_index,
-                                block_data: vec![FILL; BLOCK as usize],
-                                peer: peer(),
-                            })
-                            .await
-                            .unwrap();
-                    }
-                }
-                harness
-                    .progress
-                    .wait_for(|p| p.completed_pieces as u64 == PIECES)
-                    .await
-                    .unwrap();
-            })
-        });
-}
-
-/// The same work with the blocks of each piece reversed, so the running hash
-/// is useless and every piece falls back to reading the store and hashing it
-/// whole.
+/// Claims every piece and reports each one verified, which is the whole of
+/// what the manager does now that connections buffer, hash and write for
+/// themselves. Two messages per piece instead of seventeen, and none of them
+/// carrying payload.
 ///
-/// This does *not* measure what incremental hashing is worth, and the near-tie
-/// with the bench above is the proof: `NullWriter::read` hands back a filled
-/// vector, so the read the fallback depends on is free here. The hashing is one
-/// pass per piece either way. What this does establish is that the fallback
-/// costs nothing in bookkeeping and stays correct -- the price of the real
-/// fallback is a whole-piece disk read, which `benches/piece_writer.rs`
-/// measures on its own.
+/// This is the ceiling a swarm cannot exceed no matter how many peers it has,
+/// because this task is the one thing they all share.
 #[divan::bench]
-fn drive_whole_download_out_of_order(bencher: divan::Bencher) {
+fn coordinate_whole_download(bencher: divan::Bencher) {
     bencher
         .counter(BytesCount::new(TOTAL))
+        .counter(ItemsCount::new(PIECES))
         .with_inputs(harness)
         .bench_values(|mut harness| {
             runtime().block_on(async move {
+                let bitfield = Bitfield(vec![0xFF; (PIECES as usize).div_ceil(8)]);
                 for piece_index in 0..PIECES as u32 {
-                    for block_index in (0..BLOCKS_PER_PIECE as u32).rev() {
-                        harness
-                            .sender
-                            .send(PieceManagerMessage::ReceiveBlock {
-                                piece_index,
-                                block_index,
-                                block_data: vec![FILL; BLOCK as usize],
-                                peer: peer(),
-                            })
-                            .await
-                            .unwrap();
-                    }
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    harness
+                        .sender
+                        .send(PieceManagerMessage::ClaimBlocks {
+                            piece_index: None,
+                            bitfield: bitfield.clone(),
+                            peer: peer(),
+                            max_blocks: BLOCKS_PER_PIECE as u32,
+                            response_sender: tx,
+                        })
+                        .await
+                        .unwrap();
+                    let _ = rx.await.unwrap();
+                    harness
+                        .sender
+                        .send(PieceManagerMessage::PieceVerified {
+                            piece_index,
+                            peer: peer(),
+                        })
+                        .await
+                        .unwrap();
                 }
                 harness
                     .progress

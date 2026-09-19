@@ -48,10 +48,24 @@ pub enum PieceManagerMessage {
         piece_index: u32,
         peer: Peer,
     },
-    ReceiveBlock {
+    /// A connection assembled a piece, checked it against the torrent's hash
+    /// and wrote it to the store. All that is left is the bookkeeping only the
+    /// manager can do: the bitfield, the totals, and telling everyone else.
+    ///
+    /// Must arrive *after* the write has landed. The bitfield is what makes a
+    /// piece servable, so a claim that overtook its own bytes would advertise
+    /// a piece that is not on disk yet.
+    ///
+    /// Idempotent by necessity: in endgame two connections can finish the same
+    /// piece, and the second one to report must change nothing.
+    PieceVerified {
         piece_index: u32,
-        block_index: u32,
-        block_data: Vec<u8>,
+        peer: Peer,
+    },
+    /// A connection assembled a piece whose hash was wrong. Nothing was
+    /// written; the piece has to be fetched again from the start.
+    PieceFailed {
+        piece_index: u32,
         peer: Peer,
     },
     ReadBlock {
@@ -126,6 +140,9 @@ pub struct ClaimReply {
 #[derive(Debug)]
 pub struct Claim {
     pub piece_index: u32,
+    /// What this piece must hash to. Carried with the claim because the
+    /// connection, not the manager, is what verifies it now.
+    pub hash: [u8; 20],
     /// The piece's own length. The last piece of a torrent is short, and
     /// block bounds are measured against this rather than the nominal
     /// piece length.

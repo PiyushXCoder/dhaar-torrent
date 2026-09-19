@@ -140,7 +140,11 @@ impl Drop for PieceHold {
     }
 }
 
-pub struct RequestManager {
+pub struct RequestManager<W>
+where
+    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     pub peer: Option<Peer>,
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
@@ -162,9 +166,94 @@ pub struct RequestManager {
     /// When this connection last sent anything at all. Keep-alives are only
     /// worth sending into silence, so this is what the timer measures from.
     last_sent: time::Instant,
+    /// The store, shared with every other connection and with the piece
+    /// manager. Sharing it is safe because every access is positional and
+    /// pieces occupy disjoint ranges: two connections working different pieces
+    /// never address the same byte.
+    piece_writer: Arc<W>,
+    /// The piece this connection is assembling, and the hash it must match.
+    /// Held here rather than in the piece manager so that buffering, hashing
+    /// and writing all happen on the connection's own task -- which is what
+    /// lets them run on as many cores as there are peers.
+    piece_buffer: Option<PieceBuffer>,
 }
 
-impl RequestManager {
+/// A piece being assembled by one connection.
+struct PieceBuffer {
+    piece_index: u32,
+    /// What the torrent says this piece must hash to.
+    hash: [u8; 20],
+    bytes: Vec<u8>,
+    /// Fed in block order; `None` once a block has arrived out of order and
+    /// the running hash can no longer be trusted.
+    hasher: Option<sha1::Sha1>,
+    next_hashed_block: u32,
+    /// Which blocks have landed, so the piece knows when it is whole.
+    have: Vec<bool>,
+}
+
+impl PieceBuffer {
+    fn new(piece_index: u32, hash: [u8; 20], piece_length: u64) -> Self {
+        Self {
+            piece_index,
+            hash,
+            bytes: vec![0u8; piece_length as usize],
+            hasher: Some(<sha1::Sha1 as sha1::Digest>::new()),
+            next_hashed_block: 0,
+            have: vec![false; piece_length.div_ceil(BLOCK_SIZE) as usize],
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.have.iter().all(|had| *had)
+    }
+
+    /// Takes the block in, in every sense: hashes it while it is still its own
+    /// value, then copies it into place. Returns false if the block was
+    /// already held, which is the endgame loser's copy and must not be counted
+    /// or hashed twice.
+    fn accept(&mut self, block_index: u32, data: &[u8]) -> bool {
+        let Some(had) = self.have.get_mut(block_index as usize) else {
+            return false;
+        };
+        if *had {
+            return false;
+        }
+        *had = true;
+        if self.next_hashed_block == block_index {
+            if let Some(hasher) = self.hasher.as_mut() {
+                sha1::Digest::update(hasher, data);
+            }
+            self.next_hashed_block += 1;
+        } else {
+            self.hasher = None;
+        }
+        let offset = (block_index as u64 * BLOCK_SIZE) as usize;
+        if offset < self.bytes.len() {
+            let end = (offset + data.len()).min(self.bytes.len());
+            self.bytes[offset..end].copy_from_slice(&data[..end - offset]);
+        }
+        true
+    }
+
+    /// The piece's hash, from the running digest when it saw every block in
+    /// order, and from the assembled bytes otherwise.
+    fn digest(&mut self) -> [u8; 20] {
+        let blocks_total = self.have.len() as u32;
+        match self.hasher.take() {
+            Some(hasher) if self.next_hashed_block == blocks_total => {
+                sha1::Digest::finalize(hasher).into()
+            }
+            _ => <sha1::Sha1 as sha1::Digest>::digest(&self.bytes).into(),
+        }
+    }
+}
+
+impl<W> RequestManager<W>
+where
+    W: crate::piece_writer::PieceWriter + Send + Sync + 'static,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: Option<Peer>,
@@ -176,6 +265,7 @@ impl RequestManager {
         outgoing_channel_sender: OutgoingChannelSender,
         piece_events: PieceEventReceiver,
         stats: Arc<DownloadStats>,
+        piece_writer: Arc<W>,
     ) -> Self {
         Self {
             peer,
@@ -195,6 +285,8 @@ impl RequestManager {
             piece_events,
             stats,
             last_sent: time::Instant::now(),
+            piece_writer,
+            piece_buffer: None,
         }
     }
 
@@ -536,6 +628,14 @@ impl RequestManager {
                 peer,
                 self.piece_manager_channel_sender.clone(),
             ));
+            // A new piece means a new buffer. Whatever the old one held is
+            // gone: nothing was written, so there is nothing to resume from
+            // and nobody else can use it.
+            self.piece_buffer = Some(PieceBuffer::new(
+                claim.piece_index,
+                claim.hash,
+                claim.piece_length,
+            ));
         }
         self.active_piece_length = claim.piece_length;
 
@@ -590,6 +690,9 @@ impl RequestManager {
             self.active_blocks.len()
         );
         self.active_blocks.clear();
+        // Nothing of this piece was written, so the bytes are only useful to a
+        // connection that goes on to finish it. Hand the memory back.
+        self.piece_buffer = None;
         hold.release().await;
     }
 
@@ -676,18 +779,86 @@ impl RequestManager {
         );
         self.stats.add_downloaded(block.len() as u64);
 
-        let peer = self.peer.unwrap();
-        self.send_to_piece_manager(PieceManagerMessage::ReceiveBlock {
-            piece_index,
-            block_index,
-            block_data: block,
-            peer,
-        })
-        .await;
+        // The block goes no further than this task. Buffering, hashing and --
+        // once the piece is whole -- writing all happen here, so a download
+        // with eight peers verifies eight pieces on eight cores instead of
+        // queueing them all behind one.
+        let accepted = self
+            .piece_buffer
+            .as_mut()
+            .is_some_and(|buffer| buffer.accept(block_index, &block));
+        if !accepted {
+            // Already held. An endgame copy that lost its race, and hashing it
+            // twice would corrupt the digest.
+            self.stats.add_wasted(block.len() as u64);
+            return self.fill_pipeline().await;
+        }
+        drop(block);
+
+        if self
+            .piece_buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.is_complete())
+        {
+            self.complete_piece().await?;
+        }
 
         // The piece stays ours until the manager says it is spent; topping it
         // up is `fill_pipeline`'s job.
         self.fill_pipeline().await
+    }
+
+    /// Verifies the assembled piece and, if it holds up, writes it before
+    /// telling the manager. The order matters: the manager sets the bitfield
+    /// bit on that message, and the bitfield is what makes a piece servable to
+    /// other peers.
+    async fn complete_piece(&mut self) -> PeerConnectionResult<()> {
+        let Some(mut buffer) = self.piece_buffer.take() else {
+            return Ok(());
+        };
+        let peer = self.peer.unwrap();
+        let piece_index = buffer.piece_index;
+        let expected = buffer.hash;
+        let digest = buffer.digest();
+
+        if digest != expected {
+            self.send_to_piece_manager(PieceManagerMessage::PieceFailed { piece_index, peer })
+                .await;
+            if let Some(hold) = self.active_piece.as_mut() {
+                hold.disarm();
+            }
+            self.active_piece = None;
+            return Ok(());
+        }
+
+        if let Err(e) = self.piece_writer.write(piece_index, 0, buffer.bytes).await {
+            // Nothing was claimed, so the piece is simply still missing. Give
+            // it back rather than reporting a completion the store cannot
+            // back up.
+            warn!(
+                "{}: piece {} could not be written: {}",
+                peer_addr(&self.peer),
+                piece_index,
+                e
+            );
+            self.send_to_piece_manager(PieceManagerMessage::PieceFailed { piece_index, peer })
+                .await;
+            if let Some(hold) = self.active_piece.as_mut() {
+                hold.disarm();
+            }
+            self.active_piece = None;
+            return Ok(());
+        }
+
+        self.send_to_piece_manager(PieceManagerMessage::PieceVerified { piece_index, peer })
+            .await;
+        // The manager took the piece back when it recorded the completion, so
+        // the guard has nothing left to hand over.
+        if let Some(hold) = self.active_piece.as_mut() {
+            hold.disarm();
+        }
+        self.active_piece = None;
+        Ok(())
     }
 
     /// Answers a peer's request out of our own storage.

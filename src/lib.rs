@@ -177,11 +177,14 @@ where
             new_piece_manager_channel();
 
         let peer_explorer = PeerExplorer::new(self.peer_sources);
+        // One store, shared. The piece manager lays it out and owns the
+        // bitfield; every connection writes the pieces it finishes.
+        let piece_writer = Arc::new(self.piece_writer);
         let piece_manager = PieceManager::new(
             &self.torrent.info.pieces,
             self.torrent.info.piece_length,
             self.torrent.info.total_length(),
-            Arc::new(self.piece_writer),
+            piece_writer.clone(),
             self.stats.clone(),
             self.progress_sender.clone(),
             self.torrent.info_hash,
@@ -192,6 +195,7 @@ where
             &self.peer_id,
             self.stats.clone(),
             self.listening_port,
+            piece_writer,
         );
 
         let status = self.status_sender.subscribe();
