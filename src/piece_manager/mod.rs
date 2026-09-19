@@ -24,6 +24,9 @@ where
     pub piece_length: u64,
     pub total_length: u64,
     pub pieces: Vec<Piece>,
+    /// One hash per piece, in index order. Immutable for the life of the
+    /// download, and handed out with every claim.
+    hashes: Arc<[[u8; 20]]>,
     // TODO: expose data from store
     pub store: Arc<W>,
     /// Fan-out of everything that completes. Connections subscribe to it so
@@ -52,7 +55,6 @@ where
 }
 
 pub struct Piece {
-    hash: [u8; 20],
     pub complete: bool,
     /// Who is assembling this piece. Normally one peer; several only in
     /// endgame, where each fetches the whole piece for itself.
@@ -73,10 +75,16 @@ where
         progress: watch::Sender<PieceProgress>,
         info_hash: [u8; 20],
     ) -> Self {
+        // Fixed the moment the torrent is parsed, so they are shared as they
+        // are rather than kept with the mutable per-piece state. Nothing ever
+        // writes one.
+        let hashes: Arc<[[u8; 20]]> = piece_hashes
+            .chunks(20)
+            .map(|hash| <[u8; 20]>::try_from(hash).unwrap())
+            .collect();
         let piceces: Vec<Piece> = piece_hashes
             .chunks(20)
-            .map(|hash| Piece {
-                hash: hash.to_vec().try_into().unwrap(),
+            .map(|_| Piece {
                 complete: false,
                 requesters: Vec::new(),
             })
@@ -85,6 +93,7 @@ where
         let bitfield = Bitfield(vec![0u8; piceces.len().div_ceil(8)]);
 
         Self {
+            hashes,
             piece_length,
             total_length,
             pieces: piceces,
@@ -104,11 +113,7 @@ where
         mut self,
         mut piece_manager_channel_receiver: channel::PieceManagerChannelReceiver,
     ) {
-        let bitfield = self
-            .store
-            .initialize(self.pieces.iter().map(|p| p.hash).collect())
-            .await
-            .unwrap();
+        let bitfield = self.store.initialize(self.hashes.to_vec()).await.unwrap();
         if let Some(bitfield) = bitfield {
             for (index, piece) in self.pieces.iter_mut().enumerate() {
                 piece.complete = bitfield.has_piece(index as u32);
@@ -259,7 +264,7 @@ where
         }
         Some(channel::Claim {
             piece_index,
-            hash: piece.hash,
+            hash: self.hashes[piece_index as usize],
             piece_length,
         })
     }
