@@ -16,8 +16,11 @@ last piece is short, and its block count, request lengths, hash check and disk
 reads are all sized to it rather than to the full piece length.
 
 The tail of a download does not stall behind one slow peer: once every remaining
-piece is spoken for, the same blocks are requested from several peers at once and
-the losers are cancelled as soon as somebody else delivers.
+piece is spoken for, a second peer may take a piece somebody is already working,
+and whichever finishes first wins. Sharing is capped at two peers per piece —
+uncapped, peers pile onto whatever is nearly done and throw away more than the
+stall costs. The duplicate piece is counted as wasted rather than cancelled
+mid-flight, which on a realistic download comes to about 0.02% of the payload.
 
 Peers can reach us, not just the other way round — the peer manager binds a TCP
 listener and supervises accepted connections alongside dialled ones. A download
@@ -147,76 +150,100 @@ unconditionally.
 
 ```sh
 scripts/bench-seeders.sh         # end to end: N seeders, one leecher, timed
-cargo bench                      # divan; component costs of the disk path
+cargo bench                      # divan; component costs of the store path
 ```
 
-One peer's throughput is capped by one design decision: a peer may hold only one
-piece at a time, so its outstanding requests can never exceed a piece's worth of
-blocks — sixteen at a 256 KiB piece length. Per-peer throughput is therefore
-`piece_length / RTT` however many peers connect, and adding peers is the only
-lever the client has. `bench-seeders.sh` pulls it directly.
+### The machine
 
-Release build, store on ext4, 128 MiB, median of three runs — and then the whole
-sweep run twice, because a single sweep turns out not to be worth much:
+Every figure below comes from one box, and none of them travel:
+
+| | |
+| --- | --- |
+| CPU | Intel Core i7-12700H, 20 logical cores, SHA-NI |
+| RAM | 15 GiB |
+| Store | ext4 on LUKS-encrypted NVMe |
+| Kernel / rustc | 6.18 LTS / 1.98.1, release build |
+
+Seeders and leecher all run on this one machine over loopback, so the numbers
+describe what the client can do when nothing else is in its way — not what a
+real swarm would give you. See the caveats below before quoting any of them.
+
+### Peers
+
+1 GiB payload, 256 KiB pieces, median of seven runs per arm:
 
 | seeders | rate | vs 1 peer |
 | ---: | ---: | ---: |
-| 1 | ~6 MB/s | 1.0x |
-| 2 | ~16 MB/s | 2.6x |
-| 4 | ~34 MB/s | 5.7x |
-| 8 | ~43 MB/s | 7.2x |
-| 16 | 144–177 MB/s | ~25x |
-| 32 | 152–201 MB/s | ~30x |
+| 1 | 378 MB/s | 1.00x |
+| 2 | 670 MB/s | 1.77x |
+| 4 | 1088 MB/s | 2.88x |
+| 8 | 1287 MB/s | 3.41x |
 
-**Nothing plateaus.** Two sweeps agree within about 5% up to eight peers, which
-is why those rows are quoted to two figures and no more. Past that they do not
-agree at all: the sixteen- and thirty-two-peer arms vary by 9–22% between
-identical runs, so they are given as ranges.
+Runs after the first in each arm agree within 2–4%; the first is always slower,
+because the store has just been written and nothing is in page cache yet. The
+medians ignore that, which is the only reason seven runs rather than three.
 
-Two reasons, and both are about the harness rather than the client. At 128 MiB
-those arms finish in under a second while the timer starts at process launch, so
-a fixed startup cost is being divided into a shrinking transfer — at 512 MiB the
-same arms report 155–177 and 184–201. And the wide arms run 33 processes on 20
-cores, with the seeders competing against the leecher they are feeding. The
-eight-peer arm is the last one that means what it says.
+**Eight peers is the last arm that measures the client.** Past it the harness
+runs 17 to 33 client processes against 20 cores — 846 OS threads at the widest —
+and the leecher starts competing with the seeders feeding it. Pinning the
+seeders to four cores each recovers 38% of the thirty-two-peer arm, which is the
+harness's overhead showing up as the client's. Those arms are not quoted here
+because they say more about the box than the code.
 
-The disk is not the limit. `write_whole_piece` — sixteen blocks plus the bitfield
-update, the real cost of a completed piece — runs at 235–268 µs on ext4, around
-1 GB/s, which is two orders of magnitude faster than the client can fill it. What
-matters there is the spread rather than the median: `read_block` is 12–18 µs
-typically and 9–10 ms at its worst, because most reads are served from the page
-cache and the occasional one is a real seek. That is why the read path stays on a
-blocking thread pool, and it is the figure that counts when seeding something too
+Scaling is sub-linear and stops mattering around eight for a plainer reason: the
+leecher peaks at 5 of 20 cores and the machine is not saturated at any arm, so
+extra peers are not extra bandwidth — they are extra processes sharing one
+loopback stack.
+
+### Where a piece's time goes
+
+Per completed 256 KiB piece, from `cargo bench --bench store`:
+
+| step | cost |
+| --- | ---: |
+| SHA-1 verify (`hash_piece`) | 213 µs |
+| Write the piece (`write_whole_piece_one_call`) | 80 µs |
+| Record it in the bitfield (`record_piece`) | 11 µs |
+
+The writes are one call rather than sixteen because a connection assembles a
+whole piece before touching the store. Sixteen block-sized writes cost 252 µs
+for the same bytes: `write_block_direct` is 5.4 µs of syscall wrapped in 14.6 µs
+of `spawn_blocking` handoff, so three quarters of the old cost was thread
+ceremony rather than I/O.
+
+`read_block` is the figure with a tail rather than a median — 10.7 µs typically
+and 2.2 ms at its worst, because most reads are page-cache hits and the
+occasional one reaches the device. That spread is why the store path stays on a
+blocking pool, and it is the number that matters when seeding something too
 large to cache.
 
 ### Reading these honestly
 
-- **Name the filesystem.** `cargo bench` follows `TMPDIR`, which on most machines
-  is tmpfs — where `fsync` has no device to reach and the disk path stops being a
-  disk path. The store used to need a RAM disk for the client's own shape to be
-  visible at all; since the per-piece flush was removed, tmpfs and ext4 agree
-  within a few percent, but that was a 5x difference until recently and nothing
-  guarantees it stays closed.
-- **Know which numbers reproduce.** Run the same bench twice on the same quiet
-  machine and `hash_piece` lands within 1%, because it is pure CPU. Everything
-  that touches the disk moves by 12–55% — `read_block` was 11.8 µs one run and
-  18.3 µs the next. Quote a disk figure to more than two significant figures and
-  you are reporting the page cache's mood.
+- **Loopback is not a network.** Every peer here is a local process with
+  effectively infinite bandwidth and no latency. The one-piece-at-a-time
+  request window that limits a real peer to `piece_length / RTT` never binds,
+  so these figures are an upper bound the internet will not reproduce.
+- **Name the filesystem.** `cargo bench` follows `TMPDIR`, which on most
+  machines is tmpfs — where the disk path stops being a disk path. tmpfs and
+  ext4 currently agree within a few percent, but that was a 5x gap before the
+  per-piece flush came out and nothing guarantees it stays closed.
+- **Know which numbers reproduce.** `hash_piece` lands within 1% run to run,
+  because it is pure CPU. Anything touching the disk moves by tens of percent.
+  Quote a disk figure to more than two significant figures and you are
+  reporting the page cache's mood.
+- **Only trust a difference bigger than the spread.** Arms agree within 2–4%
+  here, so anything under about 10% is not a result yet. A single run proves
+  nothing: the same arm has measured 492 and 1468 MB/s on this machine.
 - **A microbenchmark only says a *function* got faster.** Whether a *download*
-  got faster is a separate question with a separate answer. Removing the
-  per-piece flush is big enough to clear the noise by a wide margin — a 2.8 ms
-  `set_bitfield` became roughly 10 µs, and the eight-peer arm went from 19.5 to
-  ~43 MB/s — but an earlier disk change was worth 2.8x on the bench and nothing
-  at all end to end.
-- **Only trust a difference bigger than the spread.** Two identical sweeps
-  disagree by 5% up to eight peers and by up to 22% above it, so anything under
-  about a third is not a result yet.
+  got faster is a separate question. Removing the `spawn_blocking` around each
+  write looked like a free 2% on two arms and cost 45% at eight peers, which
+  only the end-to-end bench showed.
+
 ### Against a real link
 
-Not measured since the durability change, and so not quoted here. The last
-figures — 2.5 MB/s from a live swarm against 9.9 MB/s of available link, with a
-single HTTP stream at 0.5 — were taken before the per-piece flush came out, and
-every one of them describes a slower client than this one.
+Not measured on the current client, and so not quoted. The last figures — 2.5
+MB/s from a live swarm against 9.9 MB/s of available link — predate every change
+above and describe a far slower client.
 
 That comparison is the one worth having, because it is the only one that says
 how much of a real connection actually gets used. Redoing it means a live swarm,
@@ -226,14 +253,18 @@ between them means nothing.
 
 ## Architecture
 
-Components are independent tokio tasks talking over mpsc channels:
+Components are independent tokio tasks talking over mpsc channels. The split
+that matters is between coordination and data: the piece manager decides *who
+fetches what* and every connection does the fetching, hashing and writing
+itself, so verification runs on as many cores as there are peers.
 
 - **`Download`** — assembles every actor and their channels, spawns them, and hands back a `DownloadHandle` for status and shutdown
 - **`peer_explorer`** — owns peer sources (currently `TrackerManager` over HTTP) and streams discovered peers out
 - **`peer_manager`** — pulls peers through a selection strategy, caps concurrency at 50 connections, stops dialling once every piece is verified, and supervises the connection tasks directly: a task that panics or is dropped reports nothing, so its ending is observed rather than announced
 - **`peer_connection`** — TCP connect, handshake, bitfield exchange, then hands the framed stream to `request_manager`
-- **`request_manager`** — per-peer state machine (choke/interest, pipelined block requests, idle/request timeouts, cancels and `Have` announcements)
-- **`piece_manager`** — the sole arbiter of who downloads what: it picks a peer's piece, registers its blocks and reports back in a single message, so two peers cannot claim the same work in the gap between asking and taking. Also SHA-1 verification and writes via a `PieceWriter` trait (`DiskPieceWriter` is the disk impl)
+- **`request_manager`** — per-peer state machine (choke/interest, pipelined block requests, idle/request timeouts, `Have` announcements) and the data path: it assembles its own piece in memory, hashes it as the blocks land, verifies it and writes it to the store, reporting to `piece_manager` only once the bytes are down
+- **`piece_manager`** — the arbiter of who downloads what, and nothing else: it hands a peer a whole piece and registers the claim in one message, so two peers cannot take the same work in the gap between asking and being answered. It also owns the bitfield, the totals and the completion announcement. Payload never passes through it
+- **`store`** — the download's one file, behind a `Store` trait (`DiskStore` is the disk impl). Shared by every connection: access is positional, and pieces occupy disjoint ranges, so two connections writing different pieces never address the same byte
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
 
 Workspace crates: [`crates/bencode`](crates/bencode) (serde codec) and
@@ -265,13 +296,14 @@ rest of the time.
 - [x] Tracker announce — HTTP GET request, URL rotation, retry with backoff
 - [x] Tracker response — support binary model peers (6-byte entries)
 - [x] Peer wire protocol — TCP handshake, choke/unchoke, interested, have, bitfield, request/piece/cancel/port messages
-- [x] Piece manager — piece indices, bitfield tracking, atomic cross-peer piece and block claiming, SHA-1 verification
+- [x] Piece manager — piece indices, bitfield tracking, atomic cross-peer piece claiming
 - [x] Request manager — per-peer connection state machine, pulled out of `peer_connection`
 - [x] Connection timeouts — handshake/bitfield timeouts, 150s idle timeout, 30s outstanding-request timeout
 - [x] Request pipelining — outstanding block requests capped at one piece's worth per peer
+- [x] Per-connection data path — each peer buffers, hashes and writes its own piece, so verification scales with peer count
 - [x] Disk I/O — verified pieces written to a sparse `<name>.dhaar` temp file, split into final files on completion
 - [x] `lib.rs` for library API
-- [x] Endgame mode — once only a few blocks remain, request them from every peer at once and `Cancel` the losers
+- [x] Endgame mode — once every remaining piece is claimed, let a second peer take one too; capped at two per piece
 - [x] Completion state — stop dialing peers once every piece is verified
 - [x] Tracker reporting — real `uploaded`/`downloaded`/`left` and `started`/`completed` events
 - [x] `Download` wrapper struct — pull the wiring out of `main.rs`
