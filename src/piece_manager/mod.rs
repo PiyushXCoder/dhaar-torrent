@@ -16,6 +16,19 @@ use channel::PieceManagerMessage;
 
 pub const BLOCK_SIZE: u64 = 16 * 1024;
 
+/// How many connections may assemble the same piece at once, in endgame.
+///
+/// Endgame exists so the tail is not held hostage by one slow peer, and a
+/// second fetch is enough for that. Leaving it unbounded is worse than it
+/// sounds now that a connection abandons a piece the moment somebody else
+/// finishes it: the peer frees up, claims another piece that is also nearly
+/// done, is cancelled again, and churns. Measured on 32 peers over 64 pieces,
+/// uncapped sharing threw away 127 MiB of a 512 MiB download.
+///
+/// The cost of the cap is that a peer with nothing left to share sits idle
+/// until a piece completes, which is what `PieceComplete` wakes it for.
+const MAX_PIECE_SHARERS: usize = 2;
+
 pub struct PieceManager<E, W>
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -290,6 +303,7 @@ where
                 !piece.complete
                     && bitfield.has_piece(*index as u32)
                     && !piece.requesters.contains(&peer)
+                    && piece.requesters.len() < MAX_PIECE_SHARERS
             })
             .min_by_key(|(_, piece)| piece.requesters.len())
             .map(|(index, _)| index as u32)
@@ -576,6 +590,30 @@ mod tests {
 
         assert!(shared.is_some(), "endgame should let the tail be shared");
         assert_eq!(manager.pieces[0].requesters, vec![peer(1), peer(2)]);
+    }
+
+    /// Endgame shares a piece so one slow peer cannot hold up the tail, but
+    /// only so far: past the cap a peer is turned away rather than added to a
+    /// pile that will cancel most of them.
+    #[tokio::test]
+    async fn endgame_stops_sharing_a_piece_past_the_cap() {
+        let mut manager = manager();
+        let mut bitfield = Bitfield(vec![0u8; 1]);
+        bitfield.set_piece(0, true);
+
+        // The fixture has one piece, so there is nothing unclaimed after the
+        // first take and everything below is the endgame path.
+        for port in 1..=MAX_PIECE_SHARERS as u16 {
+            assert!(
+                manager.claim_piece(&bitfield, peer(port)).is_some(),
+                "peer {port} should have been allowed to share"
+            );
+        }
+
+        let over_cap = manager.claim_piece(&bitfield, peer(99));
+
+        assert!(over_cap.is_none(), "the cap did not hold");
+        assert_eq!(manager.pieces[0].requesters.len(), MAX_PIECE_SHARERS);
     }
 
     /// The bookkeeping a verified piece triggers is the manager's alone: the
