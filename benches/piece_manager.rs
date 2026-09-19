@@ -28,9 +28,7 @@ use dhaar_torrent::{
     wire_protocol::Bitfield,
 };
 
-const BLOCK: u64 = 16 * 1024;
 const PIECE: u64 = 256 * 1024;
-const BLOCKS_PER_PIECE: u64 = PIECE / BLOCK;
 /// Enough pieces that per-run setup does not dominate, few enough that one
 /// iteration stays in the tens of milliseconds.
 const PIECES: u64 = 64;
@@ -152,16 +150,15 @@ fn coordinate_whole_download(bencher: divan::Bencher) {
         .with_inputs(harness)
         .bench_values(|mut harness| {
             runtime().block_on(async move {
-                let bitfield = Bitfield(vec![0xFF; (PIECES as usize).div_ceil(8)]);
+                let mut bitfield = Bitfield(vec![0xFF; (PIECES as usize).div_ceil(8)]);
+                bitfield.set_piece(PIECES as u32 - 1, true);
                 for piece_index in 0..PIECES as u32 {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     harness
                         .sender
-                        .send(PieceManagerMessage::ClaimBlocks {
-                            piece_index: None,
+                        .send(PieceManagerMessage::ClaimPiece {
                             bitfield: bitfield.clone(),
                             peer: peer(),
-                            max_blocks: BLOCKS_PER_PIECE as u32,
                             response_sender: tx,
                         })
                         .await

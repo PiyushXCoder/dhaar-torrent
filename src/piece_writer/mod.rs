@@ -143,7 +143,8 @@ pub struct DiskPieceWriter {
     /// Opened once by `initialize` and held for the life of the download.
     /// Every access is positional (`pread`/`pwrite`), so there is no shared
     /// cursor for reads and writes to fight over — which is what lets every
-    /// method here take `&self`, and the writer itself be shared.
+    /// method here take `&self`, and the writer itself be shared by the piece
+    /// manager and every connection at once.
     ///
     /// Behind a mutex only because `initialize` sets it; it is taken for the
     /// length of a clone and never held across an await, so the contention is

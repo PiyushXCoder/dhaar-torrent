@@ -176,6 +176,9 @@ where
     /// and writing all happen on the connection's own task -- which is what
     /// lets them run on as many cores as there are peers.
     piece_buffer: Option<PieceBuffer>,
+    /// Blocks of the held piece not yet asked for. The manager hands over the
+    /// whole piece, so pacing the window across it happens here.
+    pending_blocks: std::collections::VecDeque<u32>,
 }
 
 /// A piece being assembled by one connection.
@@ -287,6 +290,7 @@ where
             last_sent: time::Instant::now(),
             piece_writer,
             piece_buffer: None,
+            pending_blocks: std::collections::VecDeque::new(),
         }
     }
 
@@ -472,45 +476,10 @@ where
         Ok(())
     }
 
-    /// Reacts to work finished elsewhere. Our own deliveries come back
-    /// through here too, but they have already left `active_blocks` by then,
-    /// so they fall through as no-ops.
+    /// Reacts to work finished elsewhere. A piece we were working ourselves
+    /// comes back through here too, and falls through as a no-op.
     async fn handle_piece_event(&mut self, event: PieceEvent) -> PeerConnectionResult<()> {
         match event {
-            PieceEvent::BlockComplete {
-                piece_index,
-                block_index,
-            } => {
-                if self.held_piece() != Some(piece_index) {
-                    return Ok(());
-                }
-                let Some(position) = self
-                    .active_blocks
-                    .iter()
-                    .position(|active| active.index == block_index)
-                else {
-                    return Ok(());
-                };
-                // Endgame had us racing another peer for this block and we
-                // lost. Stop the transfer rather than pay for a copy of data
-                // that is already on disk.
-                self.active_blocks.swap_remove(position);
-                let (begin, length) = self.block_bounds(block_index);
-                self.send_message(Message::Cancel {
-                    index: piece_index,
-                    begin,
-                    length,
-                })
-                .await?;
-                debug!(
-                    "{}: cancelled block {} of piece {}, another peer delivered it",
-                    peer_addr(&self.peer),
-                    block_index,
-                    piece_index
-                );
-                // A slot just came free.
-                self.fill_pipeline().await?;
-            }
             PieceEvent::PieceComplete { piece_index } => {
                 self.send_message(Message::Have(piece_index)).await?;
                 // Finishing a piece can be what makes this peer uninteresting.
@@ -563,60 +532,30 @@ where
 
     /// Keeps up to `MAX_REQUESTS` blocks in flight, all inside one piece.
     /// Working a single piece at a time means a dead connection strands at
-    /// most one partial piece.
+    /// most one piece.
     ///
-    /// The piece manager both chooses the piece and registers us against its
-    /// blocks in one message: asking what is free and then claiming it would
-    /// let a second peer take the same piece in between.
+    /// The manager is asked once per piece, not once per refill: a claim hands
+    /// over the whole piece, and which of its blocks to ask for next is this
+    /// connection's own business. That is the difference between two messages
+    /// per piece and one per window slot.
     async fn fill_pipeline(&mut self) -> PeerConnectionResult<()> {
         if self.peer_choking || !self.am_interested {
             return Ok(());
         }
-        let Some(capacity) = MAX_REQUESTS.checked_sub(self.active_blocks.len() as u32) else {
-            return Ok(());
-        };
-        if capacity == 0 {
-            return Ok(());
-        }
 
-        let bitfield = self.peer_bitfield.clone();
-        let peer = self.peer.unwrap();
-        let piece_index = self.held_piece();
-        let reply = self
-            .ask(|response_sender| PieceManagerMessage::ClaimBlocks {
-                piece_index,
-                bitfield,
-                peer,
-                max_blocks: capacity,
-                response_sender,
-            })
-            .await?;
-
-        // A spent piece is taken back by the manager in the same turn it picks
-        // the replacement. Mirror what it reports instead of inferring it: if
-        // it ever stops taking pieces back, we keep holding this one and hand
-        // it over at teardown, rather than stranding it forever.
-        if let Some(released) = reply.released {
-            debug!(
-                "{}: piece {} is spent, taken back",
-                peer_addr(&self.peer),
-                released
-            );
-            if self.held_piece() == Some(released) {
-                // Already back with the manager, so there is nothing left for
-                // the guard to hand over.
-                if let Some(hold) = self.active_piece.as_mut() {
-                    hold.disarm();
-                }
-                self.active_piece = None;
-            }
-        }
-
-        let Some(claim) = reply.granted else {
-            return Ok(());
-        };
-
-        if self.held_piece() != Some(claim.piece_index) {
+        if self.active_piece.is_none() {
+            let bitfield = self.peer_bitfield.clone();
+            let peer = self.peer.unwrap();
+            let Some(claim) = self
+                .ask(|response_sender| PieceManagerMessage::ClaimPiece {
+                    bitfield,
+                    peer,
+                    response_sender,
+                })
+                .await?
+            else {
+                return Ok(());
+            };
             debug!(
                 "{}: claimed piece {} ({} bytes)",
                 peer_addr(&self.peer),
@@ -628,21 +567,26 @@ where
                 peer,
                 self.piece_manager_channel_sender.clone(),
             ));
-            // A new piece means a new buffer. Whatever the old one held is
-            // gone: nothing was written, so there is nothing to resume from
-            // and nobody else can use it.
+            self.active_piece_length = claim.piece_length;
             self.piece_buffer = Some(PieceBuffer::new(
                 claim.piece_index,
                 claim.hash,
                 claim.piece_length,
             ));
+            self.pending_blocks = (0..claim.piece_length.div_ceil(BLOCK_SIZE) as u32).collect();
         }
-        self.active_piece_length = claim.piece_length;
 
-        for block_index in claim.blocks.iter().copied() {
+        let Some(piece_index) = self.held_piece() else {
+            return Ok(());
+        };
+        let mut sent = 0;
+        while self.active_blocks.len() < MAX_REQUESTS as usize {
+            let Some(block_index) = self.pending_blocks.pop_front() else {
+                break;
+            };
             let (begin, length) = self.block_bounds(block_index);
             self.send_message(Message::Request {
-                index: claim.piece_index,
+                index: piece_index,
                 begin,
                 length,
             })
@@ -651,25 +595,25 @@ where
                 index: block_index,
                 requested_at: time::Instant::now(),
             });
+            sent += 1;
         }
-        if !claim.blocks.is_empty() {
+
+        if sent > 0 {
             debug!(
                 "{}: requested {} block(s) of piece {}, {} in flight",
                 peer_addr(&self.peer),
-                claim.blocks.len(),
-                claim.piece_index,
+                sent,
+                piece_index,
                 self.active_blocks.len()
             );
-            // The increment half of the window series. The prose above stays
-            // for anyone reading the log; this is the same fact in the same
-            // shape as the decrement, so reconstructing the depth over time
-            // needs one parser rather than two.
+            // The increment half of the window series, in the same shape as
+            // the decrement so one parser reconstructs the depth over time.
             trace!(
                 target: WINDOW_TARGET,
                 peer = %peer_addr(&self.peer),
                 depth = self.active_blocks.len(),
-                piece = claim.piece_index,
-                granted = claim.blocks.len(),
+                piece = piece_index,
+                granted = sent,
             );
         }
         Ok(())
@@ -693,6 +637,7 @@ where
         // Nothing of this piece was written, so the bytes are only useful to a
         // connection that goes on to finish it. Hand the memory back.
         self.piece_buffer = None;
+        self.pending_blocks.clear();
         hold.release().await;
     }
 
@@ -828,6 +773,7 @@ where
                 hold.disarm();
             }
             self.active_piece = None;
+            self.pending_blocks.clear();
             return Ok(());
         }
 

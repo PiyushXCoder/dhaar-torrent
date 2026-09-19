@@ -171,17 +171,6 @@ impl Default for PieceProgress {
 /// One piece's standing, for callers that draw the piece grid.
 ///
 /// `Pending` is distinguishable from `InProgress` because a piece is not
-/// divided into blocks until somebody claims it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PieceState {
-    Pending,
-    InProgress {
-        blocks_done: u32,
-        blocks_total: u32,
-        requesters: u32,
-    },
-    Complete,
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadState {
