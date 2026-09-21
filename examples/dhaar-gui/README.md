@@ -8,6 +8,10 @@ watch it run, add another — while staying small enough to read in one sitting.
 If something here starts to feel clever, it probably belongs in the library
 instead.
 
+It lives under `examples/` because demonstrating the library is its whole
+purpose — not because it is throwaway. It is a real crate, published to
+crates.io as [`dhaar-gui`](https://crates.io/crates/dhaar-gui).
+
 ## Running it
 
 ```sh

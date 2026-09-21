@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/*",
+    "examples/*",
 ]
 
 resolver = "3"
@@ -23,8 +24,8 @@ repository = "https://github.com/PiyushXCoder/dhaar-torrent"
 readme = "README.md"
 keywords = ["bittorrent", "torrent", "p2p", "peer-to-peer", "async"]
 categories = ["network-programming", "asynchronous"]
-# Dev artefacts: 3.6 MB of cover images, sample torrents and scripts that
-# nobody depending on this crate needs to download.
+# Dev artefacts: 5.6 MB of cover art, a screen recording, sample torrents and
+# scripts that nobody depending on this crate needs to download.
 exclude = ["assets/", "sample_torrent_files/", "scripts/", ".husky/"]
 
 [dependencies]
