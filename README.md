@@ -8,7 +8,7 @@
 
 A torrent client written in Rust. Unserious. Built for fun.
 
-![the reference GUI client, pulling an Ubuntu ISO at 12.2 MiB/s](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/dhaar-gui.png)
+![the reference GUI client, pulling an Ubuntu ISO at 11.7 MiB/s](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/dhaar-gui.gif)
 
 ## Status
 
