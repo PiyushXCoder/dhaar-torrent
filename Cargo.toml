@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/*",
+    "examples/*",
 ]
 
 resolver = "3"

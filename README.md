@@ -83,7 +83,7 @@ cargo run -p dhaar-gui
 
 Press **Add torrent** to choose a `.torrent` file, and add as many as you like.
 Paths given on the command line start immediately. See
-[`crates/dhaar-gui`](crates/dhaar-gui) for what it does and does not do.
+[`examples/dhaar-gui`](examples/dhaar-gui) for what it does and does not do.
 
 ### CLI
 
@@ -299,7 +299,7 @@ itself, so verification runs on as many cores as there are peers.
 - **`status`** — atomics for the counters that move too often to be worth a message, and a `watch` of piece progress the piece manager builds in one turn of its loop
 
 Workspace crates: [`bencode-dhaar`](crates/bencode-dhaar) (serde codec) and
-[`crates/dhaar-gui`](crates/dhaar-gui) (the reference client).
+[`examples/dhaar-gui`](examples/dhaar-gui) (the reference client).
 
 ### The store
 
