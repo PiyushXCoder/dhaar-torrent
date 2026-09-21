@@ -11,10 +11,39 @@ use dhaar_torrent::{
     status::{DownloadState, DownloadStatus},
 };
 use iced::{
-    Element, Length, Subscription, Task,
+    Background, Border, Color, Element, Font, Gradient, Length, Subscription, Task, Theme,
+    font::{Family, Weight},
+    gradient,
     widget::{button, column, container, progress_bar, row, scrollable, text},
 };
 use tokio::runtime::Runtime;
+
+/// JetBrains Mono Nerd Font, bundled rather than looked up by name: the icon
+/// glyphs live in the Unicode private use area, so a machine without the font
+/// renders them as tofu rather than falling back to anything sensible.
+const FONT_REGULAR: &[u8] = include_bytes!("../fonts/JetBrainsMonoNerdFontPropo-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../fonts/JetBrainsMonoNerdFontPropo-Bold.ttf");
+
+/// The family name is read out of the font file itself, so it has to match
+/// what the file declares -- `fc-query -f '%{family}'` prints it.
+const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Propo";
+
+const UI_FONT: Font = Font {
+    family: Family::Name(FONT_FAMILY),
+    ..Font::DEFAULT
+};
+
+const UI_FONT_BOLD: Font = Font {
+    family: Family::Name(FONT_FAMILY),
+    weight: Weight::Bold,
+    ..Font::DEFAULT
+};
+
+/// Dracula's green, and the cyan it gets graded into across the progress bar.
+const GREEN: Color = Color::from_rgb(0.314, 0.980, 0.482);
+const CYAN: Color = Color::from_rgb(0.545, 0.914, 0.992);
+const PINK: Color = Color::from_rgb(1.0, 0.475, 0.776);
+const MUTED: Color = Color::from_rgb(0.68, 0.70, 0.80);
 
 /// How often the window redraws. The library samples its own status once a
 /// second, so asking more often only repeats values.
@@ -143,26 +172,73 @@ impl Client {
         iced::time::every(REFRESH).map(|_| Message::Tick)
     }
 
+    fn theme(&self) -> Theme {
+        Theme::Dracula
+    }
+
     fn view(&self) -> Element<'_, Message> {
-        let mut rows: Vec<Element<'_, Message>> = vec![
-            row(vec![
-                text("Downloads").size(22).into(),
-                button("Add torrent").on_press(Message::AddTorrent).into(),
-            ])
-            .spacing(16)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        ];
+        let header = row(vec![
+            text("󰇚 dhaar")
+                .size(46)
+                .font(UI_FONT_BOLD)
+                .color(GREEN)
+                .into(),
+            text(format!("{} active", self.downloads.len()))
+                .size(16)
+                .color(MUTED)
+                .width(Length::Fill)
+                .into(),
+            button(text("󰐕 add torrent").size(18).font(UI_FONT_BOLD))
+                .padding([12, 20])
+                .style(square(button::primary))
+                .on_press(Message::AddTorrent)
+                .into(),
+        ])
+        .spacing(18)
+        .align_y(iced::Alignment::Center);
+
+        let mut rows: Vec<Element<'_, Message>> = vec![header.into()];
 
         if let Some(error) = self.error.as_ref() {
-            rows.push(text(error.clone()).size(13).into());
+            rows.push(
+                container(text(format!("󰀦 {error}")).size(15).color(PINK))
+                    .padding(14)
+                    .width(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color { a: 0.14, ..PINK })),
+                        border: Border {
+                            color: PINK,
+                            width: 1.0,
+                            radius: 0.0.into(),
+                        },
+                        ..container::Style::default()
+                    })
+                    .into(),
+            );
         }
 
         if self.downloads.is_empty() {
             rows.push(
-                text("Nothing downloading yet — add a .torrent file to begin.")
-                    .size(14)
-                    .into(),
+                container(
+                    column(vec![
+                        text("󰇧").size(72).color(MUTED).into(),
+                        text("nothing downloading yet")
+                            .size(22)
+                            .font(UI_FONT_BOLD)
+                            .color(MUTED)
+                            .into(),
+                        text("hit 󰐕 add torrent and pick a .torrent file")
+                            .size(15)
+                            .color(MUTED)
+                            .into(),
+                    ])
+                    .spacing(10)
+                    .align_x(iced::Alignment::Center),
+                )
+                .padding(50)
+                .width(Length::Fill)
+                .align_x(iced::Alignment::Center)
+                .into(),
             );
         }
 
@@ -173,9 +249,62 @@ impl Client {
                 .map(|(index, entry)| entry.view(index)),
         );
 
-        container(scrollable(column(rows).spacing(20)).height(Length::Fill))
-            .padding(24)
+        container(scrollable(column(rows).spacing(22)).height(Length::Fill))
+            .padding(30)
             .into()
+    }
+}
+
+/// The filled part of the bar, graded green to cyan so it reads as motion in a
+/// still screenshot. `progress_bar::success` would give a flat green if this
+/// ever needs to be calmer.
+fn bar_style(_theme: &Theme) -> progress_bar::Style {
+    progress_bar::Style {
+        // Transparent: the track is the container behind this, so that the
+        // rounded corners clip the fill rather than being painted over.
+        background: Background::Color(Color::TRANSPARENT),
+        bar: Background::Gradient(Gradient::Linear(
+            gradient::Linear::new(std::f32::consts::FRAC_PI_2)
+                .add_stop(0.0, GREEN)
+                .add_stop(1.0, CYAN),
+        )),
+        border: Border::default(),
+    }
+}
+
+/// The track behind the bar. Drawn as its own container because a translucent
+/// `background` on the bar itself would sit under the fill as well.
+fn track_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.07))),
+        ..container::Style::default()
+    }
+}
+
+/// Wraps one of iced's built-in button styles and flattens its corners, so the
+/// buttons match the square cards rather than the theme's rounded default.
+fn square(
+    base: impl Fn(&Theme, button::Status) -> button::Style,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| button::Style {
+        border: Border {
+            radius: 0.0.into(),
+            ..base(theme, status).border
+        },
+        ..base(theme, status)
+    }
+}
+
+fn card_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(palette.background.weak.color)),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
     }
 }
 
@@ -184,52 +313,102 @@ impl Entry {
         let status = self.handle.status();
 
         let heading = row(vec![
-            text(self.name.clone()).size(16).into(),
-            text(describe(&status)).size(13).into(),
-            button("Remove").on_press(Message::Remove(index)).into(),
+            text(self.name.clone())
+                .size(21)
+                .font(UI_FONT_BOLD)
+                .width(Length::Fill)
+                .into(),
+            text(describe(&status))
+                .size(15)
+                .color(state_color(&status))
+                .into(),
+            button(text("󰅖").size(17))
+                .padding([8, 14])
+                .style(square(button::danger))
+                .on_press(Message::Remove(index))
+                .into(),
         ])
-        .spacing(12)
+        .spacing(14)
         .align_y(iced::Alignment::Center);
 
-        column(vec![
-            heading.into(),
-            progress_bar(0.0..=1.0, status.progress() as f32)
-                .girth(10)
+        // The number people screenshot, so it gets to be the only large thing
+        // in the card besides the title.
+        let hero = row(vec![
+            text(rate(status.download_rate))
+                .size(40)
+                .font(UI_FONT_BOLD)
+                .color(GREEN)
                 .into(),
-            text(format!(
-                "{}/{} pieces · {} peers · {} in flight · down {} · up {}",
-                status.pieces.completed_pieces,
-                status.pieces.total_pieces,
-                status.active_peers,
-                status.in_flight_pieces,
-                rate(status.download_rate),
-                rate(status.upload_rate),
-            ))
-            .size(12)
-            .into(),
-            text(format!(
-                "{} of {} · wasted {} · failed hashes {}",
-                bytes(status.pieces.verified_bytes),
-                bytes(status.pieces.total_bytes),
-                bytes(status.wasted_bytes),
-                status.hash_failures,
-            ))
-            .size(12)
-            .into(),
+            text(format!("󰕒 {}", rate(status.upload_rate)))
+                .size(17)
+                .color(CYAN)
+                .width(Length::Fill)
+                .into(),
+            text(format!("{:.1}%", status.progress() * 100.0))
+                .size(30)
+                .font(UI_FONT_BOLD)
+                .into(),
         ])
-        .spacing(6)
+        .spacing(16)
+        .align_y(iced::Alignment::Center);
+
+        let bar = container(
+            progress_bar(0.0..=1.0, status.progress() as f32)
+                .girth(26)
+                .style(bar_style),
+        )
+        .style(track_style);
+
+        container(
+            column(vec![
+                heading.into(),
+                hero.into(),
+                bar.into(),
+                text(format!(
+                    "󰄷 {}/{} pieces   󰀉 {} peers   󰑮 {} in flight",
+                    status.pieces.completed_pieces,
+                    status.pieces.total_pieces,
+                    status.active_peers,
+                    status.in_flight_pieces,
+                ))
+                .size(15)
+                .color(MUTED)
+                .into(),
+                text(format!(
+                    "󰋊 {} of {}   󰩹 {} wasted   󰀪 {} failed hashes",
+                    bytes(status.pieces.verified_bytes),
+                    bytes(status.pieces.total_bytes),
+                    bytes(status.wasted_bytes),
+                    status.hash_failures,
+                ))
+                .size(15)
+                .color(MUTED)
+                .into(),
+            ])
+            .spacing(12),
+        )
+        .padding(22)
+        .style(card_style)
         .into()
     }
 }
 
 fn describe(status: &DownloadStatus) -> String {
     let state = match status.state {
-        DownloadState::Starting => "starting",
-        DownloadState::Downloading => "downloading",
-        DownloadState::Finalizing => "finalizing",
-        DownloadState::Seeding => "seeding",
+        DownloadState::Starting => "⏳ starting",
+        DownloadState::Downloading => "🔥 downloading",
+        DownloadState::Finalizing => "🧩 finalizing",
+        DownloadState::Seeding => "🌱 seeding",
     };
-    format!("{state} · {:.1}%", status.progress() * 100.0)
+    state.to_owned()
+}
+
+fn state_color(status: &DownloadStatus) -> Color {
+    match status.state {
+        DownloadState::Starting | DownloadState::Finalizing => MUTED,
+        DownloadState::Downloading => CYAN,
+        DownloadState::Seeding => GREEN,
+    }
 }
 
 async fn pick_torrent() -> Option<PathBuf> {
@@ -260,6 +439,13 @@ fn main() -> iced::Result {
     iced::application(Client::new, Client::update, Client::view)
         .title(Client::title)
         .subscription(Client::subscription)
-        .window_size((640.0, 460.0))
+        // `font` registers the bytes; `default_font` picks what to draw with.
+        // Both are needed -- registering alone changes nothing.
+        .font(FONT_REGULAR)
+        .font(FONT_BOLD)
+        .default_font(UI_FONT)
+        .theme(Client::theme)
+        .antialiasing(true)
+        .window_size((980.0, 720.0))
         .run()
 }
