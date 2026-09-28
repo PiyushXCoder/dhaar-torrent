@@ -6,7 +6,7 @@
 [![docs.rs](https://img.shields.io/docsrs/dhaar-torrent?logo=docsdotrs)](https://docs.rs/dhaar-torrent)
 [![YouTube](https://img.shields.io/badge/YouTube-build%20log-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/playlist?list=PLCjPsGYL4lfFoyjCFFrf8qKf20SaW6qfz)
 
-A torrent client written in Rust. Unserious. Built for fun.
+A unserious torrent client written in Rust. Built for fun.
 
 ![the reference GUI client, pulling an Ubuntu ISO at 11.7 MiB/s](https://raw.githubusercontent.com/PiyushXCoder/dhaar-torrent/master/assets/dhaar-gui.gif)
 
